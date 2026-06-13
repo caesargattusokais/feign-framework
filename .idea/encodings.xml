@@ -3,6 +3,8 @@
   <component name="Encoding">
     <file url="file://$PROJECT_DIR$/core/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/core/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/feign-spring/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/feign-spring/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/java-impl/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/java-impl/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/java-processor/src/main/java" charset="UTF-8" />

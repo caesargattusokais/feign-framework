@@ -17,6 +17,7 @@
         <module>core</module>
         <module>java-impl</module>
         <module>java-processor</module>
+        <module>feign-spring</module>
     </modules>
 
     <properties>

@@ -9,6 +9,7 @@
         <module name="feign-framework-java" />
         <module name="feign-framework-core" />
         <module name="feign-framework-processor" />
+        <module name="feign-spring-boot-starter" />
       </profile>
     </annotationProcessing>
   </component>
