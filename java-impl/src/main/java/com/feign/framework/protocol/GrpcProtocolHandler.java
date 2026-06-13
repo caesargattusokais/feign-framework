@@ -4,6 +4,7 @@ import com.feign.framework.FeignException;
 import com.feign.framework.Response;
 import com.feign.framework.http.Request;
 import com.google.gson.Gson;
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.MethodDescriptor;
@@ -17,9 +18,9 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Logger;
 
 /**
  * gRPC protocol handler.
@@ -42,16 +43,42 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class GrpcProtocolHandler implements ProtocolHandler {
 
-    private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
-    private final Gson gson = new Gson();
-    private final int timeoutMs;
+    private static final Logger log = Logger.getLogger(GrpcProtocolHandler.class.getName());
 
+    private final Map<String, ChannelEntry> channels = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService healthChecker;
+    private final Gson gson = new Gson();
+    private final long callTimeoutMs;
+    private final long keepAliveSec;
+    private final long keepAliveTimeoutSec;
+    private final long idleTimeoutSec;
+
+    /** Default: 5s call timeout, 30s keep-alive, 10s keep-alive timeout, 300s idle */
     public GrpcProtocolHandler() {
-        this(5000);
+        this(5000, 30, 10, 300);
     }
 
-    public GrpcProtocolHandler(int timeoutMs) {
-        this.timeoutMs = timeoutMs;
+    public GrpcProtocolHandler(int callTimeoutMs) {
+        this(callTimeoutMs, 30, 10, 300);
+    }
+
+    /**
+     * @param callTimeoutMs       RPC call timeout in ms
+     * @param keepAliveSec        send keep-alive PING after this many seconds
+     * @param keepAliveTimeoutSec wait for PING ACK before closing channel
+     * @param idleTimeoutSec      close idle channel after this many seconds; 0 = never
+     */
+    public GrpcProtocolHandler(long callTimeoutMs, long keepAliveSec,
+                                long keepAliveTimeoutSec, long idleTimeoutSec) {
+        this.callTimeoutMs = callTimeoutMs;
+        this.keepAliveSec = keepAliveSec;
+        this.keepAliveTimeoutSec = keepAliveTimeoutSec;
+        this.idleTimeoutSec = idleTimeoutSec;
+        this.healthChecker = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "grpc-health");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     @Override
@@ -62,48 +89,32 @@ public class GrpcProtocolHandler implements ProtocolHandler {
     @Override
     public Response execute(Request request) throws Exception {
         GrpcTarget target = parseTarget(request);
-        ManagedChannel channel = getOrCreateChannel(target.host, target.port);
+        ChannelEntry entry = getOrCreateChannel(target.host, target.port);
+        entry.touch();
 
-        // Build JSON payload from request body
+        String fullMethod = target.serviceName + "/" + target.methodName;
         String jsonPayload = request.getBody() != null
-                ? new String(request.getBody())
-                : "{}";
+                ? new String(request.getBody()) : "{}";
 
-        // Call gRPC using a generic unary call
-        // Format: POST /package.ServiceName/MethodName
-        String fullMethodName = target.serviceName + "/" + target.methodName;
-
-        // Use a blocking unary call via gRPC's generic method descriptors
-        // For simplicity, we serialize to JSON, call, and deserialize response
-        io.grpc.MethodDescriptor.Marshaller<String> marshaller =
-                createStringMarshaller();
-
+        MethodDescriptor.Marshaller<String> m = stringMarshaller();
         MethodDescriptor<String, String> methodDesc =
                 MethodDescriptor.<String, String>newBuilder()
                         .setType(MethodDescriptor.MethodType.UNARY)
-                        .setFullMethodName(fullMethodName)
-                        .setRequestMarshaller(marshaller)
-                        .setResponseMarshaller(marshaller)
+                        .setFullMethodName(fullMethod)
+                        .setRequestMarshaller(m)
+                        .setResponseMarshaller(m)
                         .build();
 
-        // Execute blocking unary call
-        ClientCall<String, String> call = channel.newCall(methodDesc, CallOptions.DEFAULT);
-        String[] responseHolder = new String[1];
-        Exception[] errorHolder = new Exception[1];
+        ClientCall<String, String> call = entry.channel.newCall(methodDesc,
+                CallOptions.DEFAULT.withDeadlineAfter(callTimeoutMs, TimeUnit.MILLISECONDS));
 
         CompletableFuture<String> future = new CompletableFuture<>();
-        call.start(new ClientCall.Listener<String>() {
+        call.start(new ClientCall.Listener<>() {
+            @Override public void onMessage(String msg) { future.complete(msg); }
             @Override
-            public void onMessage(String message) {
-                future.complete(message);
-            }
-
-            @Override
-            public void onClose(io.grpc.Status status, Metadata trailers) {
-                if (!status.isOk() && !future.isDone()) {
-                    future.completeExceptionally(
-                            new StatusRuntimeException(status, trailers));
-                }
+            public void onClose(io.grpc.Status s, Metadata t) {
+                if (!s.isOk() && !future.isDone())
+                    future.completeExceptionally(new StatusRuntimeException(s, t));
             }
         }, new Metadata());
 
@@ -112,11 +123,10 @@ public class GrpcProtocolHandler implements ProtocolHandler {
         call.request(1);
 
         try {
-            String responseJson = future.get(timeoutMs, TimeUnit.MILLISECONDS);
-            return Response.of(request.getUrl(), 200, new HashMap<>(),
-                    responseJson);
-        } catch (Exception e) {
-            throw new FeignException("gRPC call failed: " + fullMethodName, e);
+            String body = future.get(callTimeoutMs, TimeUnit.MILLISECONDS);
+            return Response.of(request.getUrl(), 200, new HashMap<>(), body);
+        } catch (TimeoutException e) {
+            throw new FeignException("gRPC call timeout: " + fullMethod);
         }
     }
 
@@ -134,26 +144,37 @@ public class GrpcProtocolHandler implements ProtocolHandler {
     @Override
     public boolean isAvailable(String url) {
         try {
-            GrpcTarget target = parseTarget(url);
-            ManagedChannel channel = getOrCreateChannel(target.host, target.port);
-            return !channel.isShutdown() && !channel.isTerminated();
+            GrpcTarget target = parseTargetFromUrl(url);
+            ChannelEntry entry = channels.get(target.host + ":" + target.port);
+            if (entry == null) return false;
+            ConnectivityState s = entry.channel.getState(false);
+            return s != ConnectivityState.SHUTDOWN && s != ConnectivityState.TRANSIENT_FAILURE;
         } catch (Exception e) {
             return false;
         }
     }
 
-    // --- helpers ---
-
-    private GrpcTarget parseTarget(Request request) {
-        return parseTarget(request.getUrl());
+    public void shutdown() {
+        healthChecker.shutdownNow();
+        channels.values().forEach(e -> {
+            e.channel.shutdown();
+            if (e.healthFuture != null) e.healthFuture.cancel(false);
+        });
+        channels.clear();
     }
 
-    private GrpcTarget parseTarget(String url) {
-        // url format: grpc://host:port/serviceName/methodName
+    // ── helpers ──
+
+    private GrpcTarget parseTarget(Request request) {
+        return parseTargetFromUrl(request.getUrl());
+    }
+
+    private GrpcTarget parseTargetFromUrl(String url) {
         String withoutScheme = url.replaceFirst("^grpc://", "");
         String[] parts = withoutScheme.split("/", 3);
         if (parts.length < 3) {
-            throw new FeignException("Invalid gRPC URL format. Expected: grpc://host:port/serviceName/methodName");
+            throw new FeignException(
+                "Invalid gRPC URL. Expected: grpc://host:port/serviceName/methodName");
         }
         String[] hostPort = parts[0].split(":");
         String host = hostPort[0];
@@ -161,43 +182,71 @@ public class GrpcProtocolHandler implements ProtocolHandler {
         return new GrpcTarget(host, port, parts[1], parts[2]);
     }
 
-    private ManagedChannel getOrCreateChannel(String host, int port) {
+    private ChannelEntry getOrCreateChannel(String host, int port) {
         String key = host + ":" + port;
-        return channels.computeIfAbsent(key, k ->
-                ManagedChannelBuilder.forAddress(host, port)
-                        .usePlaintext()
-                        .build());
+        return channels.computeIfAbsent(key, k -> createChannel(host, port));
     }
 
-    private static io.grpc.MethodDescriptor.Marshaller<String> createStringMarshaller() {
-        return new io.grpc.MethodDescriptor.Marshaller<>() {
-            @Override
-            public InputStream stream(String value) {
-                return new ByteArrayInputStream(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            }
+    private ChannelEntry createChannel(String host, int port) {
+        ChannelEntry entry = new ChannelEntry();
 
-            @Override
-            public String parse(InputStream stream) {
-                try {
-                    return new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                } catch (java.io.IOException e) {
-                    throw new RuntimeException(e);
+        ManagedChannel ch = ManagedChannelBuilder.forAddress(host, port)
+                .usePlaintext()
+                .keepAliveTime(keepAliveSec, TimeUnit.SECONDS)
+                .keepAliveTimeout(keepAliveTimeoutSec, TimeUnit.SECONDS)
+                .keepAliveWithoutCalls(true)
+                .idleTimeout(idleTimeoutSec, TimeUnit.SECONDS)
+                .build();
+
+        entry.channel = ch;
+
+        // Health check: periodically monitor connectivity state
+        entry.healthFuture = healthChecker.scheduleWithFixedDelay(() -> {
+            ConnectivityState state = ch.getState(false);
+
+            if (state == ConnectivityState.TRANSIENT_FAILURE) {
+                log.warning("gRPC TRANSIENT_FAILURE " + host + ":" + port + " — resetting backoff");
+                ch.resetConnectBackoff();
+            }
+            if (state == ConnectivityState.SHUTDOWN) {
+                channels.remove(host + ":" + port);
+                log.info("gRPC SHUTDOWN " + host + ":" + port);
+            }
+            if (idleTimeoutSec > 0) {
+                long idle = System.currentTimeMillis() - entry.lastUsed.get();
+                if (idle > idleTimeoutSec * 1000L) {
+                    log.info("gRPC idle timeout " + host + ":" + port);
+                    ch.shutdown();
+                    channels.remove(host + ":" + port);
                 }
+            }
+            // Trigger connectivity check (forces keep-alive PING)
+            ch.getState(true);
+
+        }, keepAliveSec, keepAliveSec, TimeUnit.SECONDS);
+
+        return entry;
+    }
+
+    private static MethodDescriptor.Marshaller<String> stringMarshaller() {
+        return new MethodDescriptor.Marshaller<>() {
+            @Override public InputStream stream(String value) {
+                return new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8)); }
+            @Override public String parse(InputStream stream) {
+                try { return new String(stream.readAllBytes(), StandardCharsets.UTF_8); }
+                catch (java.io.IOException e) { throw new RuntimeException(e); }
             }
         };
     }
 
-    private static class GrpcTarget {
-        final String host;
-        final int port;
-        final String serviceName;
-        final String methodName;
+    // ── inner classes ──
 
-        GrpcTarget(String host, int port, String serviceName, String methodName) {
-            this.host = host;
-            this.port = port;
-            this.serviceName = serviceName;
-            this.methodName = methodName;
-        }
+    private static class ChannelEntry {
+        volatile ManagedChannel channel;
+        volatile ScheduledFuture<?> healthFuture;
+        final AtomicLong lastUsed = new AtomicLong(System.currentTimeMillis());
+        void touch() { lastUsed.set(System.currentTimeMillis()); }
     }
+
+    private record GrpcTarget(String host, int port, String serviceName, String methodName) {}
 }
