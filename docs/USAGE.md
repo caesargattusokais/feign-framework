@@ -14,7 +14,7 @@
 - [负载均衡 (LoadBalancer)](#负载均衡-loadbalancer)
 - [重试机制 (Retry)](#重试机制-retry)
 - [HTTP 连接池](#http-连接池)
-- [协议抽象层 (Protocol)](#协议抽象层-protocol)
+- [协议支持 (gRPC / WebSocket)](#协议支持)
 - [配置参考](#配置参考)
 - [进阶用法](#进阶用法)
 - [Python 使用指南](#python-使用指南)
@@ -313,25 +313,95 @@ new FeignClientFactory()
 
 ---
 
-## 协议抽象层 (Protocol)
+## 协议支持
 
-为未来 gRPC、WebSocket 预留的扩展点。
+框架通过 `ProtocolHandler.scheme()` 自动匹配 URL scheme，无需修改注解。
 
 ```
-ProtocolHandler (interface)
-├── HttpProtocolHandler     ← 当前实现
-├── GrpcProtocolHandler     ← 待实现
-└── WebSocketProtocolHandler ← 待实现
+URL scheme  →  ProtocolHandler
+─────────────────────────────────
+http://     →  HttpProtocolHandler      (连接池 + 短连接)
+https://    →  HttpProtocolHandler      (同上)
+grpc://     →  GrpcProtocolHandler      (HTTP/2 长连接 + 保活)
+ws://       →  WebSocketProtocolHandler  (全双工长连接 + 保活)
+wss://      →  WebSocketProtocolHandler  (同上)
 ```
+
+### gRPC 客户端
 
 ```java
-// 实现 ProtocolHandler 即可支持新协议
-public class GrpcProtocolHandler implements ProtocolHandler {
-    @Override public String scheme() { return "grpc"; }
-    @Override public Response execute(Request request) { ... }
-    @Override public CompletableFuture<Response> executeAsync(Request request) { ... }
+@FeignClient(name = "user-rpc", url = "grpc://localhost:50051")
+public interface UserRpc {
+    @FeignMethod(method = HttpMethod.POST, path = {"UserService", "GetUser"})
+    Map<String, Object> getUser(@Path("id") String id);
+}
+
+// path 两段式: {serviceName}/{methodName}
+// → grpc://host:port/UserService/GetUser
+```
+
+**保活参数：**
+```java
+// 自定义保活
+FeignClientProxy.addProtocolHandler(new GrpcProtocolHandler(
+    5000,   // callTimeoutMs — 单次 RPC 超时
+    30,     // keepAliveSec — 30s 无活动发 PING
+    10,     // keepAliveTimeoutSec — PING ACK 等 10s
+    300     // idleTimeoutSec — 空闲 5 分钟关闭; 0=永不
+));
+```
+
+**服务端要求：** gRPC 服务端必须支持 HTTP/2 PING 帧。标准 gRPC server（Java/Go/Python）默认已启用。如果用 grpc-gateway 或自定义实现，需确保：
+- 响应 HTTP/2 PING frame（`SETTINGS_ENABLE_PUSH=0` 不必需）
+- 配置 `GRPC_ARG_KEEPALIVE_TIME` 和 `GRPC_ARG_KEEPALIVE_TIMEOUT`
+- gRPC-Go: `keepalive.ServerParameters{Time: 30s, Timeout: 10s}`
+- gRPC-Java: `NettyServerBuilder.keepAliveTime(30, SECONDS).keepAliveTimeout(10, SECONDS)`
+
+### WebSocket 客户端
+
+```java
+@FeignClient(name = "chat", url = "ws://localhost:8080/chat")
+public interface ChatService {
+    @FeignMethod(method = HttpMethod.POST, path = {"send"})
+    void sendMessage(String message);
+}
+
+// 请求体作为 WebSocket text message 发送
+// 返回值由服务端 reply 填充（请求-响应模式），或 null（fire-and-forget）
+```
+
+**保活参数：**
+```java
+FeignClientProxy.addProtocolHandler(new WebSocketProtocolHandler(
+    10,    // connectTimeoutSec
+    20,    // pingIntervalSec — 每 20s 发 PING
+    5,     // pongTimeoutSec — 5s 无 PONG 判定死亡
+    120    // idleTimeoutSec — 空闲 2 分钟关闭
+));
+```
+
+**服务端要求：** WebSocket 服务端必须正确响应 PING/PONG 帧（RFC 6455 §5.5.2）：
+- 收到 PING → 必须在当前连接上回复 PONG（payload 可选一致）
+- 标准 WebSocket 库（javax.websocket、ws、gorilla/websocket、websockets）已内置
+- 如果自建 WebSocket 服务，务必处理 Ping Frame opcode(0x9)，回复 Pong(0xA)
+- 客户端超时未收到 PONG → 标记连接死亡 → 下次请求自动重连
+
+### 添加自定义协议
+
+```java
+// 实现 ProtocolHandler，声明 scheme()
+public class MqttProtocolHandler implements ProtocolHandler {
+    @Override public String scheme() { return "mqtt"; }
+    @Override public Response execute(Request req) { ... }
+    @Override public CompletableFuture<Response> executeAsync(Request req) { ... }
     @Override public boolean isAvailable(String url) { ... }
 }
+
+// 注册一行即可
+FeignClientProxy.addProtocolHandler(new MqttProtocolHandler());
+
+// 使用
+@FeignClient(name = "iot", url = "mqtt://broker:1883/topic")
 ```
 
 ---
@@ -508,10 +578,9 @@ feign-framework/
 │   └── FeignException.java
 │
 ├── java-impl/                     # Java 实现
-│   ├── client/                    # HttpClientImpl
 │   ├── codec/                     # GsonDecoder
 │   ├── loadbalancer/              # RoundRobin, Random
-│   ├── protocol/                  # HttpProtocolHandler (连接池)
+│   ├── protocol/                  # HttpProtocolHandler, GrpcProtocolHandler, WebSocketProtocolHandler
 │   └── retry/                     # DefaultRetryPolicy
 │
 ├── java-processor/                # 编译期校验 + 运行时代理
@@ -543,8 +612,7 @@ feign-framework/
 
 | 类别 | 接口/抽象 | 默认实现 | 包路径 |
 |------|----------|---------|--------|
-| HTTP 客户端 | `HttpClient` | `HttpClientImpl` | `client` |
-| 协议处理器 | `ProtocolHandler` | `HttpProtocolHandler` | `protocol` |
+| 协议处理器 | `ProtocolHandler` | `HttpProtocolHandler` `GrpcProtocolHandler` `WebSocketProtocolHandler` | `protocol` |
 | 响应解码器 | `Decoder` | `GsonDecoder` | `codec` |
 | 拦截器 | `FeignInterceptor` | — | `interceptor` |
 | 负载均衡 | `LoadBalancer` | `RoundRobin` `Random` | `loadbalancer` |
