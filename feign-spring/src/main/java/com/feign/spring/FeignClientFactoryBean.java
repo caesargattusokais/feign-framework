@@ -52,15 +52,15 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
 
         // ── Decoder ──
         Decoder decoder = resolveDecoder(config);
-        if (decoder != null) factory.decoder(decoder);
+        factory.decoder(decoder);
 
         // ── ProtocolHandler ──
         ProtocolHandler handler = resolveProtocolHandler(config);
-        if (handler != null) factory.protocolHandler(handler);
+        factory.protocolHandler(handler);
 
         // ── LoadBalancer ──
         LoadBalancer lb = resolveLoadBalancer(config);
-        if (lb != null) factory.loadBalancer(lb);
+        factory.loadBalancer(lb);
 
         // ── Interceptors (by bean name) ──
         List<FeignInterceptor> interceptors = resolveInterceptors(config);
@@ -87,15 +87,14 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
     // ── resolvers ──
 
     private Decoder resolveDecoder(FeignProperties.ClientConfig config) {
-        if (config.getDecoder() == null) return new GsonDecoder();
+        Decoder defaultDecoder = beanFactory.getBean(Decoder.class);
+        if (config.getDecoder() == null) return defaultDecoder;
 
         String name = config.getDecoder();
-        if ("gson".equalsIgnoreCase(name)) return new GsonDecoder();
-        // "jackson" or custom bean name — try Spring context
         if (beanFactory.containsBean(name)) {
             return beanFactory.getBean(name, Decoder.class);
         }
-        return new GsonDecoder();
+        return defaultDecoder;
     }
 
     private ProtocolHandler resolveProtocolHandler(FeignProperties.ClientConfig config) {
@@ -116,8 +115,8 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
         }
 
         // Default HTTP with pool config
-        Integer connect = config.getConnectTimeout() != null ? config.getConnectTimeout() : 5000;
-        Integer read = config.getReadTimeout() != null ? config.getReadTimeout() : 10000;
+        int connect = config.getConnectTimeout() != null ? config.getConnectTimeout() : 5000;
+        int read = config.getReadTimeout() != null ? config.getReadTimeout() : 10000;
         FeignProperties.ClientConfig.ConnectionPool pool = config.getConnectionPool();
         if (pool != null && pool.getMaxTotal() != null && pool.getMaxPerRoute() != null) {
             return new HttpProtocolHandler(connect, read, pool.getMaxTotal(), pool.getMaxPerRoute());
@@ -141,8 +140,8 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
 
         return switch (type) {
             case ROUND_ROBIN -> new com.feign.framework.loadbalancer.RoundRobinLoadBalancer();
+            case LEAST_CONNECTIONS -> new com.feign.framework.loadbalancer.LeastConnectionsLoadBalancer();
             case RANDOM -> new com.feign.framework.loadbalancer.RandomLoadBalancer();
-            case LEAST_CONNECTIONS -> new com.feign.framework.loadbalancer.RoundRobinLoadBalancer();
         };
     }
 

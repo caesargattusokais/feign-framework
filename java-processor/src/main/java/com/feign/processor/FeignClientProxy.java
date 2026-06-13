@@ -156,13 +156,17 @@ public class FeignClientProxy implements InvocationHandler {
 
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                return protocolHandler.execute(rebuildUrl(request, targetUrl));
+                Response resp = protocolHandler.execute(rebuildUrl(request, targetUrl));
+                markLbComplete(targetUrl);
+                return resp;
             } catch (FeignException e) {
+                markLbComplete(targetUrl);
                 lastException = e;
                 notifyError(request, e);
                 if (!shouldRetry(e, attempt)) throw e;
                 sleep(retryPolicy.getRetryInterval());
             } catch (Exception e) {
+                markLbComplete(targetUrl);
                 lastException = new FeignException("Request failed: " + targetUrl, e);
                 notifyError(request, lastException);
                 if (!shouldRetry(e, attempt)) throw lastException;
@@ -343,6 +347,12 @@ public class FeignClientProxy implements InvocationHandler {
         }
     }
 
+    private void markLbComplete(String url) {
+        if (loadBalancer instanceof com.feign.framework.loadbalancer.LeastConnectionsLoadBalancer lb) {
+            lb.markComplete(url);
+        }
+    }
+
     // ── helpers ──
 
     private Request rebuildUrl(Request original, String newUrl) {
@@ -420,7 +430,7 @@ public class FeignClientProxy implements InvocationHandler {
         return switch (type) {
             case ROUND_ROBIN -> new com.feign.framework.loadbalancer.RoundRobinLoadBalancer();
             case RANDOM      -> new com.feign.framework.loadbalancer.RandomLoadBalancer();
-            case LEAST_CONNECTIONS -> new com.feign.framework.loadbalancer.RoundRobinLoadBalancer();
+            case LEAST_CONNECTIONS -> new com.feign.framework.loadbalancer.LeastConnectionsLoadBalancer();
         };
     }
 
