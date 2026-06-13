@@ -1,559 +1,141 @@
 # Feign Framework 使用指南
 
-> 一个类 OpenFeign 的声明式 HTTP 客户端框架，支持 Java 和 Python，提供注解驱动 API、负载均衡、重试机制和异步调用。
+> 一个类 OpenFeign 的声明式 HTTP 客户端框架，支持 Java 和 Python。
+> 注解驱动 API、类型化解码、拦截器链、负载均衡、重试、异步、连接池——开箱即用。
 
 ---
 
 ## 目录
 
-1. [快速开始](#快速开始)
-2. [Java 使用指南](#java-使用指南)
-3. [Python 使用指南](#python-使用指南)
-4. [负载均衡](#负载均衡)
-5. [重试机制](#重试机制)
-6. [配置管理](#配置管理)
-7. [进阶用法](#进阶用法)
+- [快速开始](#快速开始)
+- [声明式 API](#声明式-api)
+- [响应解码 (Decoder)](#响应解码-decoder)
+- [拦截器链 (Interceptor)](#拦截器链-interceptor)
+- [负载均衡 (LoadBalancer)](#负载均衡-loadbalancer)
+- [重试机制 (Retry)](#重试机制-retry)
+- [HTTP 连接池](#http-连接池)
+- [协议抽象层 (Protocol)](#协议抽象层-protocol)
+- [配置参考](#配置参考)
+- [进阶用法](#进阶用法)
+- [Python 使用指南](#python-使用指南)
+- [项目结构](#项目结构)
+- [API 对照表](#api-对照表)
 
 ---
 
 ## 快速开始
 
-### Java 项目
-
-**1. 添加 Maven 依赖**
+### 1. 添加依赖
 
 ```xml
-<!-- pom.xml -->
-<dependencies>
-    <!-- 核心抽象层 -->
-    <dependency>
-        <groupId>com.feign</groupId>
-        <artifactId>feign-framework-core</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
-    </dependency>
-
-    <!-- Java 实现层 -->
-    <dependency>
-        <groupId>com.feign</groupId>
-        <artifactId>feign-framework-java</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
-    </dependency>
-
-    <!-- 注解处理器 -->
-    <dependency>
-        <groupId>com.feign</groupId>
-        <artifactId>feign-framework-processor</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
-        <scope>provided</scope>
-    </dependency>
-</dependencies>
+<dependency>
+    <groupId>com.feign</groupId>
+    <artifactId>feign-framework-core</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+</dependency>
+<dependency>
+    <groupId>com.feign</groupId>
+    <artifactId>feign-framework-java</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+</dependency>
+<dependency>
+    <groupId>com.feign</groupId>
+    <artifactId>feign-framework-processor</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <scope>provided</scope>   <!-- 编译期校验，非必须 -->
+</dependency>
 ```
 
-**2. 定义 Feign 客户端接口**
+### 2. 定义接口
 
 ```java
-import com.feign.framework.annotations.FeignClient;
-import com.feign.framework.annotations.FeignMethod;
-import com.feign.framework.http.HttpMethod;
+import com.feign.framework.annotations.*;
 
 @FeignClient(name = "user-service", url = "http://localhost:8080")
 public interface UserService {
 
     @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
-    String getUser(Long id);
+    User getUser(@Path("id") Long id);
 
     @FeignMethod(method = HttpMethod.POST, path = {"users"})
-    String createUser(String userData);
+    User createUser(User user);
 }
 ```
 
-**3. 创建代理实例并调用**
+### 3. 调用
 
 ```java
-import com.feign.processor.FeignClientFactory;
+UserService service = FeignClientFactory.create(UserService.class);
 
-public class App {
-    public static void main(String[] args) {
-        // 创建代理实例
-        UserService userService = FeignClientFactory.create(UserService.class);
-
-        // 调用远程 API — 就像调用本地方法一样！
-        String userJson = userService.getUser(1L);
-        System.out.println("User: " + userJson);
-
-        String newUser = userService.createUser("{\"name\":\"张三\",\"email\":\"zhangsan@example.com\"}");
-        System.out.println("Created: " + newUser);
-    }
-}
-```
-
-### Python 项目
-
-**1. 安装**
-
-```bash
-pip install -e python-impl/
-# 依赖: httpx, pytest (开发环境)
-```
-
-**2. 定义 Feign 客户端**
-
-```python
-from feign import FeignClient
-
-class UserService(FeignClient):
-    def __init__(self):
-        super().__init__(
-            name="user-service",
-            url="http://localhost:8080"
-        )
-
-    def get_user(self, user_id: int) -> dict:
-        """GET /users/{id}"""
-        pass  # 方法体由框架自动处理
-
-    async def create_user(self, user_data: dict) -> dict:
-        """POST /users"""
-        pass  # 异步方法自动处理
-```
-
-**3. 使用客户端**
-
-```python
-import asyncio
-from user_service import UserService
-
-# 创建客户端
-service = UserService()
-
-# 同步调用
-user = service.get_user(1)
-print(f"User: {user}")
-
-# 异步调用
-async def main():
-    new_user = await service.create_user({"name": "张三"})
-    print(f"Created: {new_user}")
-
-asyncio.run(main())
+User user = service.getUser(1L);        // 自动解码 JSON → User
+User created = service.createUser(newUser);
 ```
 
 ---
 
-## Java 使用指南
+## 声明式 API
 
-### 基本用法
+### 注解
 
-#### 定义客户端接口
-
-```java
-@FeignClient(name = "api-service", url = "https://api.example.com")
-public interface ApiService {
-
-    // GET 请求
-    @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
-    String getUser(@Path("id") Long id);
-
-    // POST 请求
-    @FeignMethod(method = HttpMethod.POST, path = {"users"})
-    String createUser(String body);
-
-    // PUT 请求
-    @FeignMethod(method = HttpMethod.PUT, path = {"users", "{id}"})
-    String updateUser(@Path("id") Long id, String body);
-
-    // DELETE 请求
-    @FeignMethod(method = HttpMethod.DELETE, path = {"users", "{id}"})
-    String deleteUser(@Path("id") Long id);
-}
-```
-
-#### 使用 HttpClientImpl 直接调用
-
-```java
-import com.feign.framework.client.HttpClientImpl;
-import com.feign.framework.client.HttpClientConfig;
-import com.feign.framework.http.Request;
-import com.feign.framework.http.HttpMethod;
-import com.feign.framework.Response;
-import java.util.HashMap;
-
-public class DirectCallExample {
-    public static void main(String[] args) throws Exception {
-        // 创建 HTTP 客户端
-        HttpClientConfig config = new HttpClientConfig();
-        config.setConnectTimeout(5000);
-        config.setReadTimeout(10000);
-
-        HttpClientImpl client = new HttpClientImpl(config);
-
-        // 构建请求
-        Request request = Request.of(
-            HttpMethod.GET,
-            "https://jsonplaceholder.typicode.com/users/1",
-            new HashMap<>(),
-            null,
-            new HashMap<>()
-        );
-
-        // 执行请求
-        Response response = client.execute(request);
-        System.out.println("Status: " + response.getStatusCode());
-        System.out.println("Body: " + response.getBodyAsString());
-
-        // 异步执行
-        client.executeAsync(request).thenAccept(resp -> {
-            System.out.println("Async result: " + resp.getBodyAsString());
-        });
-    }
-}
-```
-
-### @FeignClient 注解参数
+#### @FeignClient — 接口级别
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `name` | String | `""` | 服务名称，用于服务发现 |
+| `name` | String | `""` | 服务名 |
 | `url` | String | `""` | 服务地址 |
 | `path` | String[] | `{}` | 路径前缀 |
 | `loadBalancer` | LoadBalancerType | `ROUND_ROBIN` | 负载均衡策略 |
-| `timeout` | int | `5000` | 请求超时（毫秒） |
+| `connectTimeout` | int | `5000` | 连接超时 (ms) |
+| `readTimeout` | int | `10000` | 读取超时 (ms) |
+| `maxRetries` | int | `3` | 最大重试次数 |
+| `retryInterval` | long | `1000` | 重试间隔 (ms) |
 
-### @FeignMethod 注解参数
+#### @FeignMethod — 方法级别
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `method` | HttpMethod | `GET` | HTTP 方法 |
-| `path` | String[] | `{}` | 请求路径 |
-| `headers` | String[] | `{}` | 请求头（格式：`"Key: Value"`） |
+| `path` | String[] | `{}` | 路径片段，自动用 `/` 拼接 |
+| `headers` | String[] | `{}` | 请求头，格式 `"Key: Value"` |
 | `name` | String | `""` | 方法别名 |
 
-### HTTP 方法枚举
+#### @Path — 参数级别
 
 ```java
-public enum HttpMethod {
-    GET,     // 获取资源
-    POST,    // 创建资源
-    PUT,     // 更新资源
-    DELETE,  // 删除资源
-    PATCH,   // 部分更新
-    HEAD,    // 获取头部信息
-    OPTIONS, // 获取支持的选项
-    TRACE    // 追踪请求
-}
+@FeignMethod(method = HttpMethod.GET, path = {"users", "{id}", "posts", "{postId}"})
+User getUserPost(@Path("id") Long userId, @Path("postId") Long postId);
+// → GET /users/1/posts/42
 ```
 
 ---
 
-## Python 使用指南
+## 响应解码 (Decoder)
 
-### 基本用法
+**核心能力：返回类型化对象，就像 OpenFeign 一样。** 框架自动将 HTTP 响应体解码为目标类型。
 
-#### 定义客户端类
-
-```python
-from feign import FeignClient
-from feign.models import HttpMethod
-
-class ProductService(FeignClient):
-    def __init__(self):
-        super().__init__(
-            name="product-service",
-            url="http://localhost:8080/api"
-        )
-
-    def list_products(self) -> list:
-        """GET /api/products"""
-        pass
-
-    def get_product(self, product_id: int) -> dict:
-        """GET /api/products/{id}"""
-        pass
-
-    def create_product(self, product_data: dict) -> dict:
-        """POST /api/products"""
-        pass
-
-    async def delete_product(self, product_id: int) -> dict:
-        """DELETE /api/products/{id}"""
-        pass
-```
-
-#### HTTP 方法自动映射
-
-框架根据方法名前缀自动推断 HTTP 方法：
-
-| 方法名前缀 | HTTP 方法 | URL 模式 | 示例 |
-|-----------|-----------|---------|------|
-| `get_*` | GET | `/{method_name}` | `get_user()` → GET /user |
-| `post_*` | POST | `/{method_name}` | `post_user()` → POST /user |
-| `put_*` | PUT | `/{method_name}` | `put_user()` → PUT /user |
-| `delete_*` | DELETE | `/{method_name}` | `delete_user()` → DELETE /user |
-| `patch_*` | PATCH | `/{method_name}` | `patch_user()` → PATCH /user |
-
-### 使用 FeignClientConfig
-
-```python
-from feign import FeignClient
-from feign.models import LoadBalancerType
-
-class OrderService(FeignClient):
-    def __init__(self):
-        super().__init__(
-            name="order-service",
-            url="http://localhost:8080/api",
-            timeout=10000,
-            headers={"Content-Type": "application/json"},
-            load_balancer=LoadBalancerType.RANDOM
-        )
-
-    def create_order(self, order: dict) -> dict:
-        pass
-```
-
-### 直接使用 HttpClientImpl
-
-```python
-from feign.client.http_client import HttpClientImpl
-from feign.models import Request, HttpMethod
-import asyncio
-
-# 同步请求
-client = HttpClientImpl(timeout=5000)
-request = Request(
-    method=HttpMethod.GET,
-    url="https://jsonplaceholder.typicode.com/users/1",
-    headers={"Accept": "application/json"},
-    body=None,
-    params={}
-)
-response = client.execute(request)
-print(f"Status: {response.status_code}")
-print(f"Body: {response.body}")
-
-# 异步请求
-async def async_example():
-    response = await client.execute_async(request)
-    print(f"Async Status: {response.status_code}")
-
-asyncio.run(async_example())
-```
-
----
-
-## 负载均衡
-
-### Java
+### 内置：GsonDecoder（默认）
 
 ```java
-import com.feign.framework.loadbalancer.RoundRobinLoadBalancer;
-import com.feign.framework.loadbalancer.RandomLoadBalancer;
-import com.feign.framework.http.Request;
-import java.util.Arrays;
-import java.util.List;
-
-// 轮询负载均衡
-RoundRobinLoadBalancer roundRobin = new RoundRobinLoadBalancer();
-roundRobin.addServer("http://server1:8080");
-roundRobin.addServer("http://server2:8080");
-roundRobin.addServer("http://server3:8080");
-
-List<String> servers = Arrays.asList(
-    "http://server1:8080",
-    "http://server2:8080",
-    "http://server3:8080"
-);
-
-for (int i = 0; i < 10; i++) {
-    String server = roundRobin.select(null, servers);
-    System.out.println("请求 " + i + " → " + server);
-}
-
-// 随机负载均衡
-RandomLoadBalancer random = new RandomLoadBalancer();
-String randomServer = random.select(null, servers);
-System.out.println("随机选择: " + randomServer);
-```
-
-### Python
-
-```python
-from feign.loadbalancer.round_robin import RoundRobinLoadBalancer
-from feign.loadbalancer.random import RandomLoadBalancer
-
-# 轮询负载均衡
-rr = RoundRobinLoadBalancer()
-rr.add_server("http://server1:8080")
-rr.add_server("http://server2:8080")
-rr.add_server("http://server3:8080")
-
-for i in range(10):
-    server = rr.select("my-service")
-    print(f"请求 {i} → {server}")
-
-# 随机负载均衡
-rand = RandomLoadBalancer()
-servers = ["http://server1:8080", "http://server2:8080"]
-rand.select(None, servers)
-
-# 在 FeignClient 中使用
-class UserService(FeignClient):
-    def __init__(self):
-        super().__init__(
-            name="user-service",
-            url="http://localhost:8080",
-            load_balancer=RandomLoadBalancer()
-        )
-
-    def get_user(self, user_id: int) -> dict:
-        pass
-```
-
----
-
-## 重试机制
-
-### Java
-
-```java
-import com.feign.framework.retry.DefaultRetryPolicy;
-
-// 默认重试策略（最多重试 3 次，间隔 1 秒）
-DefaultRetryPolicy policy = new DefaultRetryPolicy();
-
-// 自定义重试策略
-DefaultRetryPolicy customPolicy = new DefaultRetryPolicy();
-customPolicy.setMaxRetries(5);        // 最多重试 5 次
-customPolicy.setRetryInterval(2000);  // 间隔 2 秒
-customPolicy.setEnabled(true);        // 启用重试
-
-// 检查是否可以重试
-if (customPolicy.canRetry(new RuntimeException("网络错误"), 0)) {
-    System.out.println("可以重试...");
-    System.out.println("最大重试次数: " + customPolicy.getMaxRetries());
-    System.out.println("重试间隔: " + customPolicy.getRetryInterval() + "ms");
-    System.out.println("负载均衡: " + customPolicy.getLoadBalancerType());
-}
-```
-
-### Python
-
-```python
-from feign.retry.default_retry_policy import DefaultRetryPolicy
-
-# 默认重试策略
-policy = DefaultRetryPolicy()
-
-# 自定义重试策略
-policy.max_retries = 5
-policy.retry_interval = 2000
-policy.enabled = True
-
-# 检查是否可以重试
-if policy.can_retry(0, RuntimeError("网络错误")):
-    print("可以重试...")
-    print(f"最大重试次数: {policy.max_retries()}")
-    print(f"重试间隔: {policy.retry_interval()}ms")
-
-# 重试逻辑
-max_retries = policy.max_retries()
-for retry_count in range(max_retries):
-    try:
-        response = client.execute(request)
-        if response.successful():
-            break
-    except Exception as e:
-        if not policy.can_retry(retry_count, e):
-            raise
-        print(f"重试 {retry_count + 1}/{max_retries}...")
-```
-
----
-
-## 配置管理
-
-### Java - HttpClientConfig
-
-```java
-import com.feign.framework.client.HttpClientConfig;
-
-HttpClientConfig config = new HttpClientConfig();
-config.setConnectTimeout(5000);     // 连接超时 5 秒
-config.setReadTimeout(10000);       // 读取超时 10 秒
-config.setEnableLogging(true);      // 启用日志
-```
-
-### Java - FeignConfig
-
-```java
-import com.feign.framework.config.FeignConfig;
-import com.feign.framework.client.HttpClientImpl;
-
-FeignConfig config = new FeignConfig("http://localhost:8080");
-config.setConnectTimeout(3000);
-config.setReadTimeout(7000);
-
-// 使用 Builder 模式
-FeignConfig builderConfig = new FeignConfig()
-    .withBaseUrl("http://localhost:8080")
-    .withConnectTimeout(5000)
-    .withReadTimeout(10000)
-    .withRetryEnabled(true)
-    .withMaxRetries(3)
-    .withDefaultHeader("Authorization", "Bearer token123");
-```
-
-### Python - FeignClientConfig
-
-```python
-from feign.models import FeignClientConfig
-
-# 通过 __init__ 配置
-class UserService(FeignClient):
-    def __init__(self):
-        super().__init__(
-            name="user-service",
-            url="http://localhost:8080/api",
-            timeout=10000,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer token123"
-            }
-        )
-
-    def get_user(self, user_id: int) -> dict:
-        pass
-```
-
----
-
-## 响应解码（Decoder）
-
-OpenFeign 的核心能力：返回**类型化对象**而非原始 Response。
-
-### 内置解码器
-
-```java
-// GsonDecoder — 默认，自动将 JSON 反序列化为目标类型
-public interface UserService {
-    @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
-    User getUser(@Path("id") Long id);  // 返回 User 对象，不是 Response！
-}
+// 返回类型 → 自动解码
+User        getUser(@Path("id") Long id);     // JSON → User
+String      getRaw();                          // 原始字符串
+Response    getResponse();                     // 不解码
+void        delete(@Path("id") Long id);       // 忽略
+CompletableFuture<User> getAsync(...);          // 异步解码
 ```
 
 ### 自定义解码器
 
 ```java
-// Jackson 解码器示例
 public class JacksonDecoder implements Decoder {
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Override
     public Object decode(Response response, Type type) throws Exception {
         if (type == Response.class) return response;
-        if (!response.successful()) throw new FeignException(...);
-        JavaType javaType = mapper.constructType(type);
-        return mapper.readValue(response.getBodyAsString(), javaType);
+        if (!response.successful()) throw new FeignException(response.getStatusCode(),
+            response.getUrl(), response.getBodyAsString());
+        return mapper.readValue(response.getBodyAsString(), mapper.constructType(type));
     }
 }
 
@@ -563,27 +145,93 @@ UserService service = new FeignClientFactory()
     .build(UserService.class);
 ```
 
-### 返回类型支持
+---
 
-| 接口返回类型 | 行为 |
-|------------|------|
-| `User` | decoder 将 JSON → User 对象 |
-| `Response` | 返回原始 Response（不解码） |
-| `String` | 返回 body 字符串 |
-| `void` | 返回 null |
-| `CompletableFuture<User>` | 异步 + 解码 |
+## 拦截器链 (Interceptor)
+
+拦截器在请求前后执行，支持**自定义排序**。
+
+```java
+// ── 定义 ──
+class AuthInterceptor implements FeignInterceptor {
+    @Override public int order() { return 0; }   // 最先执行
+
+    @Override
+    public Request beforeExecute(Request req) {
+        req.getHeaders().put("Authorization", "Bearer " + token);
+        return req;
+    }
+}
+
+class LoggingInterceptor implements FeignInterceptor {
+    @Override public int order() { return 10; }
+
+    @Override
+    public Request beforeExecute(Request req) {
+        System.out.println("→ " + req.getMethod() + " " + req.getUrl());
+        return req;
+    }
+
+    @Override
+    public Response afterExecute(Response resp) {
+        System.out.println("← " + resp.getStatusCode());
+        return resp;
+    }
+
+    @Override
+    public void onError(Request req, FeignException e) {
+        System.err.println("✗ " + e.getMessage());
+    }
+}
+```
+
+### 注册（两种方式）
+
+```java
+// 方式 1：实现 order()，任意顺序注册
+factory.addInterceptor(new AuthInterceptor());
+factory.addInterceptor(new LoggingInterceptor());
+
+// 方式 2：注册时指定顺序
+factory.addInterceptor(new AuthInterceptor(), 0);
+factory.addInterceptor(new LoggingInterceptor(), 10);
+factory.addInterceptor(new MetricsInterceptor(), 20);
+```
+
+### 执行顺序
+
+```
+beforeExecute:  Auth(0)  →  Logging(10)  →  Metrics(20)    // order 升序
+    ↓ HTTP 调用
+afterExecute:   Metrics(20)  →  Logging(10)  →  Auth(0)    // order 降序(reverse)
+```
 
 ---
 
-## 自定义负载均衡
+## 负载均衡 (LoadBalancer)
+
+### 内置策略
+
+- **RoundRobin** — 轮询
+- **Random** — 随机
+- **LeastConnections** — 最少连接（占位）
+
+### 注解配置
+
+```java
+@FeignClient(name = "user-service", url = "http://localhost:8080",
+             loadBalancer = LoadBalancerType.ROUND_ROBIN)
+```
+
+### 自定义负载均衡器
 
 ```java
 // 实现 LoadBalancer 接口
 public class WeightedLoadBalancer implements LoadBalancer {
     @Override
     public String select(Request request, List<String> servers) {
-        // 你的自定义选择逻辑
-        return servers.get(0);
+        // 你的自定义逻辑
+        ...
     }
     @Override public void addServer(String url) { }
     @Override public void removeServer(String url) { }
@@ -591,184 +239,253 @@ public class WeightedLoadBalancer implements LoadBalancer {
     @Override public LoadBalancerType getType() { return LoadBalancerType.ROUND_ROBIN; }
 }
 
-// 注入自定义负载均衡器
-UserService service = new FeignClientFactory()
+// 注入
+new FeignClientFactory()
     .loadBalancer(new WeightedLoadBalancer())
     .build(UserService.class);
 ```
 
 ---
 
-## HTTP 连接池
+## 重试机制 (Retry)
+
+代理内置重试循环，无需手动编码。
+
+### 配置
 
 ```java
-// 默认连接池：200 最大连接，20 每路由
-new HttpProtocolHandler(5000, 10000);
+@FeignClient(maxRetries = 3, retryInterval = 1000)
+```
 
-// 自定义连接池大小
+- 重试条件：RuntimeException、IOException、FeignException
+- 可通过 `RetryPolicy` 接口自定义
+- 每次重试前等待 `retryInterval` ms
+
+### 手动使用
+
+```java
+DefaultRetryPolicy policy = new DefaultRetryPolicy();
+policy.setMaxRetries(5);
+policy.setRetryInterval(2000);
+
+if (policy.canRetry(new RuntimeException("timeout"), 0)) {
+    // 可以重试
+}
+```
+
+---
+
+## HTTP 连接池
+
+`HttpProtocolHandler` 内置 **PoolingHttpClientConnectionManager**。
+
+### 默认配置
+
+```java
+// maxTotal=200, maxPerRoute=20
+new HttpProtocolHandler(5000, 10000);
+```
+
+### 自定义连接池
+
+```java
 new HttpProtocolHandler(
     5000,   // connectTimeout ms
     10000,  // readTimeout ms
     500,    // maxTotal connections
     50      // maxPerRoute connections
 );
+```
 
-// 注入自定义 HttpClient（完全控制）
+### 完全自定义 HttpClient
+
+```java
 CloseableHttpClient myClient = HttpClients.custom()
     .setConnectionManager(new PoolingHttpClientConnectionManager())
-    .setDefaultCredentialsProvider(myProvider)
+    .setProxy(new HttpHost("proxy", 8080))
+    .setDefaultCredentialsProvider(credsProvider)
     .build();
 
-UserService service = new FeignClientFactory()
+new FeignClientFactory()
     .protocolHandler(new HttpProtocolHandler(myClient, 5000, 10000))
     .build(UserService.class);
 ```
 
 ---
 
-## 拦截器排序
+## 协议抽象层 (Protocol)
+
+为未来 gRPC、WebSocket 预留的扩展点。
+
+```
+ProtocolHandler (interface)
+├── HttpProtocolHandler     ← 当前实现
+├── GrpcProtocolHandler     ← 待实现
+└── WebSocketProtocolHandler ← 待实现
+```
 
 ```java
-// 方式 1: 实现 order() 方法
-class AuthInterceptor implements FeignInterceptor {
-    @Override public int order() { return 0; }  // 最先执行
-    ...
+// 实现 ProtocolHandler 即可支持新协议
+public class GrpcProtocolHandler implements ProtocolHandler {
+    @Override public String scheme() { return "grpc"; }
+    @Override public Response execute(Request request) { ... }
+    @Override public CompletableFuture<Response> executeAsync(Request request) { ... }
+    @Override public boolean isAvailable(String url) { ... }
 }
+```
 
-// 方式 2: 注册时指定顺序
-new FeignClientFactory()
-    .addInterceptor(new AuthInterceptor(), 0)     // order=0, 最先
-    .addInterceptor(new LoggingInterceptor(), 10) // order=10
-    .addInterceptor(new MetricsInterceptor(), 20) // order=20, 最后
+---
+
+## 配置参考
+
+### 完整构建链
+
+```java
+UserService service = new FeignClientFactory()
+    .decoder(new JacksonDecoder())                        // 响应解码器
+    .protocolHandler(new HttpProtocolHandler(             // HTTP 客户端 + 连接池
+        5000, 10000, 200, 20))
+    .loadBalancer(new MyLoadBalancer())                   // 自定义负载均衡
+    .addInterceptor(new AuthInterceptor(), 0)              // 拦截器链
+    .addInterceptor(new LoggingInterceptor(), 10)
+    .addInterceptor(new MetricsInterceptor(), 20)
     .build(UserService.class);
+```
 
-// beforeExecute: Auth(0) → Logging(10) → Metrics(20)
-// afterExecute:  Metrics(20) → Logging(10) → Auth(0)  (reverse)
+### 静态快捷方式
+
+```java
+// 最简
+UserService svc = FeignClientFactory.create(UserService.class);
+
+// URL 覆盖
+UserService svc = FeignClientFactory.create("http://prod:8080", UserService.class);
+```
+
+### @FeignClient 完整配置
+
+```java
+@FeignClient(
+    name = "user-service",
+    url = "http://localhost:8080/api",
+    loadBalancer = LoadBalancerType.ROUND_ROBIN,
+    connectTimeout = 5000,
+    readTimeout = 10000,
+    maxRetries = 3,
+    retryInterval = 1000
+)
+public interface UserService {
+    @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
+    User getUser(@Path("id") Long id);
+
+    @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
+    CompletableFuture<User> getUserAsync(@Path("id") Long id);
+}
 ```
 
 ---
 
 ## 进阶用法
 
-### 1. 结合代理和 HTTP 客户端
+### 执行管道
 
-```java
-// Java: 创建代理后用 HttpClientImpl 执行请求
-import com.feign.framework.client.HttpClientImpl;
-import com.feign.framework.client.HttpClientConfig;
-import com.feign.processor.FeignClientFactory;
-
-UserService proxy = FeignClientFactory.create(UserService.class);
-String result = proxy.getUser(1L);
-// 代理内部使用 FeignClientProxy 构建 Request，然后交给 HttpClientImpl 执行
+```
+call  →  build request  →  interceptors(before)  →  load balancer
+      →  retry loop  →  protocolHandler  →  decoder  →  interceptors(after)
+      →  return typed object
 ```
 
-### 2. 自定义异常处理
+### 异常处理
 
 ```java
-import com.feign.framework.FeignException;
-
 try {
-    String result = userService.getUser(999L);
+    User user = service.getUser(999L);
 } catch (FeignException e) {
-    System.out.println("状态码: " + e.getStatus());
-    System.out.println("请求方法: " + e.getMethod());
-    System.out.println("请求 URL: " + e.getUrl());
-    System.out.println("错误信息: " + e.getMessage());
+    e.getStatus();    // HTTP 状态码
+    e.getMethod();    // 请求方法
+    e.getUrl();       // 请求 URL
+    e.getMessage();   // 错误详情
 }
 ```
 
-### 3. 异步批量调用
+### 异步调用
+
+```java
+CompletableFuture<User> future = service.getUserAsync(1L);
+future.thenAccept(user -> System.out.println(user.getName()))
+      .exceptionally(e -> { log.error("Failed", e); return null; });
+```
+
+### 直接使用 HttpClient（不走代理）
+
+```java
+HttpClientImpl client = new HttpClientImpl(new HttpClientConfig());
+Request req = Request.of(HttpMethod.GET, "https://api.example.com/users/1",
+                          new HashMap<>(), null, new HashMap<>());
+Response resp = client.execute(req);
+```
+
+---
+
+## Python 使用指南
+
+### 安装
+
+```bash
+pip install -e python-impl/
+```
+
+### 定义和调用
 
 ```python
+from feign import FeignClient
+
+class UserService(FeignClient):
+    def __init__(self):
+        super().__init__(name="user-service", url="http://localhost:8080/api",
+                         timeout=10000)
+
+    def get_user(self, user_id: int) -> dict:
+        """GET /api/user"""
+        pass
+
+    async def create_user(self, data: dict) -> dict:
+        """POST /api/user"""
+        pass
+
+# 同步
+service = UserService()
+user = service.get_user(1)
+
+# 异步
 import asyncio
-from feign.client.http_client import HttpClientImpl
-from feign.models import Request, HttpMethod
+result = asyncio.run(service.create_user({"name": "张三"}))
+```
 
-async def fetch_all_users(client, user_ids):
-    tasks = []
-    for uid in user_ids:
-        request = Request(
-            method=HttpMethod.GET,
-            url=f"https://api.example.com/users/{uid}",
-            headers={},
-            body=None,
-            params={}
+### 方法名 → HTTP 方法映射
+
+| 前缀 | HTTP |
+|------|------|
+| `get_*` | GET |
+| `post_*` | POST |
+| `put_*` | PUT |
+| `delete_*` | DELETE |
+| `patch_*` | PATCH |
+
+### Python 自定义配置
+
+```python
+from feign.loadbalancer.random import RandomLoadBalancer
+from feign.retry.default_retry_policy import DefaultRetryPolicy
+
+class OrderService(FeignClient):
+    def __init__(self):
+        super().__init__(
+            name="order-service",
+            url="http://localhost:8080",
+            timeout=10000,
+            headers={"Authorization": "Bearer xxx"}
         )
-        tasks.append(client.execute_async(request))
-    return await asyncio.gather(*tasks)
-
-# 使用
-async def main():
-    client = HttpClientImpl(timeout=5000)
-    results = await fetch_all_users(client, [1, 2, 3, 4, 5])
-    for response in results:
-        print(f"用户: {response.json()}")
-
-asyncio.run(main())
-```
-
-```java
-// Java: 异步批量调用
-import java.util.concurrent.CompletableFuture;
-import java.util.List;
-
-HttpClientImpl client = new HttpClientImpl(new HttpClientConfig());
-
-List<CompletableFuture<Response>> futures = List.of(1L, 2L, 3L, 4L, 5L).stream()
-    .map(id -> Request.of(
-        HttpMethod.GET,
-        "https://api.example.com/users/" + id,
-        new HashMap<>(),
-        null,
-        new HashMap<>()
-    ))
-    .map(request -> {
-        try {
-            return client.executeAsync(request);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    })
-    .collect(java.util.stream.Collectors.toList());
-
-CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-futures.forEach(f -> {
-    try {
-        Response response = f.get();
-        System.out.println("响应: " + response.getBodyAsString());
-    } catch (Exception e) {
-        e.printStackTrace();
-    }
-});
-```
-
-### 4. 请求/响应拦截
-
-```java
-// Java: 包装 HttpClientImpl 添加拦截逻辑
-public class LoggingHttpClient implements com.feign.framework.client.HttpClient {
-    private final HttpClientImpl delegate;
-
-    public LoggingHttpClient(HttpClientConfig config) {
-        this.delegate = new HttpClientImpl(config);
-    }
-
-    @Override
-    public Response execute(Request request) throws Exception {
-        System.out.println("[请求] " + request.getMethod() + " " + request.getUrl());
-        long start = System.currentTimeMillis();
-
-        Response response = delegate.execute(request);
-
-        long elapsed = System.currentTimeMillis() - start;
-        System.out.println("[响应] " + response.getStatusCode() + " (" + elapsed + "ms)");
-        return response;
-    }
-
-    // ... 其他方法委托给 delegate
-}
 ```
 
 ---
@@ -777,103 +494,85 @@ public class LoggingHttpClient implements com.feign.framework.client.HttpClient 
 
 ```
 feign-framework/
-├── core/                     # 核心抽象层 (Java)
-│   ├── annotations/          # @FeignClient, @FeignMethod
-│   ├── http/                 # Request, Response, HttpMethod
-│   ├── client/               # HttpClient 接口
-│   ├── loadbalancer/         # LoadBalancer 接口, LoadBalancerType
-│   ├── retry/                # RetryPolicy 接口
-│   ├── config/               # FeignConfig
+│
+├── core/                          # 核心抽象层
+│   ├── annotations/               # @FeignClient @FeignMethod @Path
+│   ├── http/                      # Request, Response, HttpMethod
+│   ├── client/                    # HttpClient 接口
+│   ├── codec/                     # Decoder 接口
+│   ├── interceptor/               # FeignInterceptor 接口
+│   ├── loadbalancer/              # LoadBalancer, LoadBalancerType
+│   ├── protocol/                  # ProtocolHandler 接口
+│   ├── retry/                     # RetryPolicy 接口
+│   ├── config/                    # FeignConfig
 │   └── FeignException.java
 │
-├── java-impl/                # Java 实现层
-│   ├── client/               # HttpClientImpl, FeignClientFactory
-│   ├── loadbalancer/         # RoundRobin, Random
-│   └── retry/                # DefaultRetryPolicy
+├── java-impl/                     # Java 实现
+│   ├── client/                    # HttpClientImpl
+│   ├── codec/                     # GsonDecoder
+│   ├── loadbalancer/              # RoundRobin, Random
+│   ├── protocol/                  # HttpProtocolHandler (连接池)
+│   └── retry/                     # DefaultRetryPolicy
 │
-├── java-processor/           # 注解处理器
-│   └── processor/            # FeignClientProxy, FeignClientFactory
+├── java-processor/                # 编译期校验 + 运行时代理
+│   └── processor/
+│       ├── FeignClientProxy       # 核心 InvocationHandler（完整执行管道）
+│       ├── FeignClientFactory     # 工厂（流式 API + 依赖注入）
+│       ├── FeignClientMetadata    # 注解元数据
+│       └── FeignClientProcessor   # JSR 269 编译期校验
 │
-├── python-impl/              # Python 实现层
-│   ├── src/feign/
-│   │   ├── client/           # HttpClient, FeignClient
-│   │   ├── loadbalancer/     # RoundRobin, Random
-│   │   ├── retry/            # DefaultRetryPolicy
-│   │   ├── models.py         # Request, Response
-│   │   └── interfaces.py     # ABC 接口定义
-│   └── examples/
+├── python-impl/                   # Python 实现
+│   └── src/feign/                 # models, interfaces, client, loadbalancer, retry
 │
-└── examples/                 # Java 示例
-    ├── UserService.java
-    └── FeignClientDemo.java
+├── examples/                      # 示例代码
+│   ├── UserService.java
+│   ├── FeignClientDemo.java
+│   └── AdvancedExample.java       # 完整功能演示
+│
+└── docs/                          # 文档
+    ├── USAGE.md                   # 使用指南
+    ├── FIXES.md                   # 修复历史
+    └── superpowers/               # 设计文档 + 实施计划
 ```
 
 ---
 
-## 常见问题
+## API 对照表
 
-### Q: 如何处理路径参数？
+### Java 核心类
 
-**Java:**
-```java
-@FeignMethod(method = HttpMethod.GET, path = {"users", "{id}", "posts", "{postId}"})
-String getUserPost(@Path("id") Long id, @Path("postId") Long postId);
-```
+| 类别 | 接口/抽象 | 默认实现 | 包路径 |
+|------|----------|---------|--------|
+| HTTP 客户端 | `HttpClient` | `HttpClientImpl` | `client` |
+| 协议处理器 | `ProtocolHandler` | `HttpProtocolHandler` | `protocol` |
+| 响应解码器 | `Decoder` | `GsonDecoder` | `codec` |
+| 拦截器 | `FeignInterceptor` | — | `interceptor` |
+| 负载均衡 | `LoadBalancer` | `RoundRobin` `Random` | `loadbalancer` |
+| 重试策略 | `RetryPolicy` | `DefaultRetryPolicy` | `retry` |
+| 动态代理 | — | `FeignClientProxy` | `processor` |
 
-**Python:**
-```python
-def get_user_post(self, user_id: int, post_id: int) -> dict:
-    # URL: {base_url}/users/{user_id}/posts/{post_id}
-    pass
-```
-
-### Q: 如何设置自定义请求头？
-
-**Java:**
-```java
-@FeignMethod(method = HttpMethod.GET, path = {"users"}, headers = {"Authorization: Bearer xxx", "X-Custom: value"})
-String getUsers();
-```
-
-**Python:**
-```python
-super().__init__(
-    name="service",
-    url="http://localhost:8080",
-    headers={"Authorization": "Bearer xxx"}
-)
-```
-
-### Q: 如何启用异步调用？
-
-**Java:** 使用 `CompletableFuture`
-```java
-CompletableFuture<Response> future = client.executeAsync(request);
-future.thenAccept(response -> {
-    System.out.println(response.getBodyAsString());
-});
-```
-
-**Python:** 使用 `async/await`
-```python
-response = await service.create_user(data)
-```
-
----
-
-## API 参考
-
-### 核心类对照表
+### Java ↔ Python
 
 | 功能 | Java | Python |
 |------|------|--------|
-| HTTP 客户端接口 | `com.feign.framework.client.HttpClient` | `feign.interfaces.HttpClient` |
-| HTTP 客户端实现 | `HttpClientImpl` | `HttpClientImpl` |
-| 请求模型 | `com.feign.framework.http.Request` | `feign.models.Request` |
-| 响应模型 | `com.feign.framework.Response` | `feign.models.Response` |
-| 负载均衡接口 | `com.feign.framework.loadbalancer.LoadBalancer` | `feign.interfaces.LoadBalancer` |
-| 轮询均衡器 | `RoundRobinLoadBalancer` | `RoundRobinLoadBalancer` |
-| 随机均衡器 | `RandomLoadBalancer` | `RandomLoadBalancer` |
-| 重试策略 | `com.feign.framework.retry.RetryPolicy` | `feign.interfaces.RetryPolicy` |
-| 默认重试 | `DefaultRetryPolicy` | `DefaultRetryPolicy` |
-| 异常类 | `FeignException` | — |
+| 声明式客户端 | `@FeignClient` 注解 | `FeignClient` 基类 |
+| 请求模型 | `Request.of(...)` | `Request` dataclass |
+| 响应模型 | `Response.of(...)` | `Response` dataclass |
+| HTTP 客户端 | `HttpClientImpl` | `HttpClientImpl` |
+| 轮询负载均衡 | `RoundRobinLoadBalancer` | `RoundRobinLoadBalancer` |
+| 随机负载均衡 | `RandomLoadBalancer` | `RandomLoadBalancer` |
+| 重试策略 | `DefaultRetryPolicy` | `DefaultRetryPolicy` |
+| 异常 | `FeignException` | Python 内置异常 |
+
+---
+
+## 关于 FeignClientProcessor
+
+`FeignClientProcessor` 是 JSR 269 编译期注解处理器，当前负责**编译期校验**：
+
+- 检查 `@FeignClient` 是否标注在 `interface` 上
+- 统计 `@FeignMethod` 方法数量
+- 在编译期输出诊断信息
+
+**实际的代理和请求执行由 `FeignClientProxy`（运行时 InvocationHandler）完成。**
+Processor 是可选的（`<scope>provided</scope>`），删除它不影响运行。
