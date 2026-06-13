@@ -10,8 +10,10 @@ import com.feign.framework.http.Request;
 import com.feign.framework.interceptor.FeignInterceptor;
 import com.feign.framework.loadbalancer.LoadBalancer;
 import com.feign.framework.loadbalancer.LoadBalancerType;
+import com.feign.framework.protocol.GrpcProtocolHandler;
 import com.feign.framework.protocol.ProtocolHandler;
 import com.feign.framework.protocol.HttpProtocolHandler;
+import com.feign.framework.protocol.WebSocketProtocolHandler;
 import com.feign.framework.retry.RetryPolicy;
 import com.feign.framework.retry.DefaultRetryPolicy;
 
@@ -85,7 +87,7 @@ public class FeignClientProxy implements InvocationHandler {
 
         this.protocolHandler = protocolHandler != null
             ? protocolHandler
-            : new HttpProtocolHandler(connectTimeout, readTimeout);
+            : createProtocolHandler(metadata.getUrl());
 
         this.loadBalancer = loadBalancer != null
             ? loadBalancer
@@ -373,6 +375,44 @@ public class FeignClientProxy implements InvocationHandler {
     }
 
     // ── defaults ──
+
+    /**
+     * Built-in protocol handlers. The proxy iterates these to find one whose
+     * {@link ProtocolHandler#scheme()} matches the URL prefix.
+     *
+     * <p>To add a custom handler, instantiate it and pass into the constructor,
+     * or call {@link #addProtocolHandler(ProtocolHandler)}.
+     */
+    private static final List<ProtocolHandler> builtinHandlers = new ArrayList<>();
+
+    static {
+        builtinHandlers.add(new HttpProtocolHandler(5000, 5000));  // scheme = "http"
+        builtinHandlers.add(new GrpcProtocolHandler());             // scheme = "grpc"
+        builtinHandlers.add(new WebSocketProtocolHandler());        // scheme = "ws"
+    }
+
+    /** Register a custom protocol handler for auto-detection via {@link ProtocolHandler#scheme()}. */
+    public static void addProtocolHandler(ProtocolHandler handler) {
+        builtinHandlers.add(handler);
+    }
+
+    /**
+     * Auto-select ProtocolHandler by matching URL against each handler's {@code scheme()}.
+     * TLS variants (https, wss) are auto-matched to their plain counterparts.
+     */
+    private ProtocolHandler createProtocolHandler(String url) {
+        if (url == null || !url.contains("://")) {
+            return builtinHandlers.get(0); // HTTP fallback
+        }
+
+        for (ProtocolHandler handler : builtinHandlers) {
+            String scheme = handler.scheme();
+            if (url.startsWith(scheme + "://") || url.startsWith(scheme + "s://")) {
+                return handler;
+            }
+        }
+        return builtinHandlers.get(0); // HTTP fallback
+    }
 
     private LoadBalancer createDefaultLoadBalancer() {
         LoadBalancerType type = metadata.getLoadBalancerType();
