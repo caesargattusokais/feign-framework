@@ -237,7 +237,7 @@ public class FeignClientProxy implements InvocationHandler {
             return response;
         }
         if (!response.successful()) {
-            throw new FeignException(response.getStatusCode(), response.getUrl(),
+            throw new FeignException(response.statusCode(), response.getUrl(),
                 "Request failed: " + response.getBodyAsString());
         }
         return decoder.decode(response, type);

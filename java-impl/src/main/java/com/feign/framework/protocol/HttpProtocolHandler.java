@@ -14,6 +14,7 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.ParseException;
 import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
@@ -185,7 +186,12 @@ public class HttpProtocolHandler implements ProtocolHandler {
             headers.put(h.getName(), h.getValue());
         }
         HttpEntity entity = resp.getEntity();
-        String body = entity != null ? EntityUtils.toString(entity) : null;
+        String body = null;
+        try {
+            body = entity != null ? EntityUtils.toString(entity) : null;
+        } catch (ParseException e) {
+            throw new RuntimeException(e);
+        }
         return Response.of(url, status, headers, body);
     }
 }

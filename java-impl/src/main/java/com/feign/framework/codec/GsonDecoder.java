@@ -32,7 +32,7 @@ public class GsonDecoder implements Decoder {
             return response;
         }
         if (type == byte[].class) {
-            return response.getBody();
+            return response.body();
         }
         // Use Gson to deserialize
         return gson.fromJson(body, type);
