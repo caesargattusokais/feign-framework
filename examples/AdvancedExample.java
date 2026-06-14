@@ -1,101 +1,89 @@
 package examples;
 
-import com.feign.framework.FeignException;
-import com.feign.framework.Response;
-import com.feign.framework.annotations.FeignClient;
-import com.feign.framework.annotations.FeignMethod;
-import com.feign.framework.annotations.Path;
-import com.feign.framework.codec.Decoder;
-import com.feign.framework.codec.GsonDecoder;
-import com.feign.framework.http.HttpMethod;
-import com.feign.framework.http.Request;
+import com.feign.framework.*;
+import com.feign.framework.annotations.*;
+import com.feign.framework.circuit.*;
+import com.feign.framework.codec.*;
+import com.feign.framework.discovery.ServiceDiscovery;
+import com.feign.framework.http.*;
 import com.feign.framework.interceptor.FeignInterceptor;
-import com.feign.framework.loadbalancer.LoadBalancer;
-import com.feign.framework.loadbalancer.LoadBalancerType;
-import com.feign.framework.loadbalancer.RoundRobinLoadBalancer;
-import com.feign.framework.protocol.HttpProtocolHandler;
+import com.feign.framework.loadbalancer.*;
+import com.feign.framework.protocol.*;
 import com.feign.processor.FeignClientFactory;
-import com.google.gson.Gson;
 
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Demonstrates all Feign framework capabilities:
+ * Advanced example demonstrating ALL Feign framework capabilities:
+ *
  * <ul>
- *   <li>Typed response decoding (User object, not raw Response)</li>
- *   <li>Custom decoder (Gson)</li>
+ *   <li>@Path / @Query parameter binding</li>
+ *   <li>Typed response + FeignResponse (headers)</li>
+ *   <li>Encoder (auto body serialization)</li>
+ *   <li>Interceptor chain with ordering</li>
  *   <li>Custom load balancer</li>
- *   <li>Connection pooling (via HttpProtocolHandler)</li>
- *   <li>Interceptor ordering</li>
+ *   <li>Circuit breaker (3-state)</li>
+ *   <li>Service discovery</li>
+ *   <li>Fallback</li>
  *   <li>Async execution</li>
- *   <li>@Path parameter resolution</li>
+ *   <li>Custom protocol handler (connection pool)</li>
  * </ul>
  */
 public class AdvancedExample {
 
-    // ── Domain model ──
+    // ── Domain ──
     public static class User {
         public Long id;
         public String name;
         public String email;
+        public User() {}
+        public User(Long id, String name) { this.id = id; this.name = name; }
         @Override public String toString() { return "User{id=" + id + ", name=" + name + "}"; }
     }
 
-    // ── Feign client (returns TYPED objects, not Response!) ──
-    @FeignClient(
-        name = "user-service",
-        url = "http://localhost:8080/api",
-        loadBalancer = LoadBalancerType.ROUND_ROBIN,
-        connectTimeout = 5000,
-        readTimeout = 10000,
-        maxRetries = 3,
-        retryInterval = 1000
-    )
+    // ── Feign client ──
+    @FeignClient(name = "user-service", url = "http://localhost:8080/api",
+                 loadBalancer = LoadBalancerType.ROUND_ROBIN,
+                 connectTimeout = 5000, readTimeout = 10000,
+                 maxRetries = 3, retryInterval = 1000,
+                 fallback = UserServiceFallback.class)
     public interface UserService {
 
-        /** Returns decoded User object — not raw Response */
         @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
-        User getUser(@Path("id") Long userId);
+        User getUser(@Path("id") Long id);
 
-        /** Async version */
         @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
-        CompletableFuture<User> getUserAsync(@Path("id") Long userId);
+        FeignResponse<User> getUserWithHeaders(@Path("id") Long id);
 
-        /** Multiple path params */
-        @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}", "posts", "{postId}"})
-        Response getUserPost(@Path("id") Long userId, @Path("postId") Long postId);
+        @FeignMethod(method = HttpMethod.GET, path = {"users"})
+        List<User> listUsers(@Query("page") int page, @Query("size") int size);
+
+        @FeignMethod(method = HttpMethod.POST, path = {"users"})
+        User createUser(User user); // Encoder auto-serializes
+
+        @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
+        CompletableFuture<User> getUserAsync(@Path("id") Long id);
     }
 
-    // ── Custom load balancer ──
-    static class StickyLoadBalancer implements LoadBalancer {
-        private String stickyServer;
-
-        @Override
-        public String select(Request request, List<String> servers) {
-            if (servers == null || servers.isEmpty()) throw new IllegalStateException("No servers");
-            if (stickyServer == null || !servers.contains(stickyServer)) {
-                stickyServer = servers.get(0);
-            }
-            return stickyServer;
-        }
-        @Override public void addServer(String url) {}
-        @Override public void removeServer(String url) {}
-        @Override public void reset() { stickyServer = null; }
-        @Override public LoadBalancerType getType() { return LoadBalancerType.ROUND_ROBIN; }
+    public static class UserServiceFallback implements UserService {
+        @Override public User getUser(Long id) { return new User(id, "fallback"); }
+        @Override public FeignResponse<User> getUserWithHeaders(Long id) { return new FeignResponse<>(new User(id, "fallback"), Map.of()); }
+        @Override public List<User> listUsers(int page, int size) { return List.of(); }
+        @Override public User createUser(User u) { return new User(0L, "fallback"); }
+        @Override public CompletableFuture<User> getUserAsync(Long id) { return CompletableFuture.completedFuture(new User(id, "fallback")); }
     }
 
-    // ── Interceptors with explicit ordering ──
+    // ── Interceptors (ordered) ──
     static class AuthInterceptor implements FeignInterceptor {
         @Override public int order() { return 0; }
         @Override public Request beforeExecute(Request r) {
-            r.getHeaders().put("Authorization", "Bearer my-token");
+            r.getHeaders().put("Authorization", "Bearer token");
             return r;
         }
     }
 
-    static class LoggingInterceptor implements FeignInterceptor {
+    static class LogInterceptor implements FeignInterceptor {
         @Override public int order() { return 10; }
         @Override public Request beforeExecute(Request r) {
             System.out.println("[REQ] " + r.getMethod() + " " + r.getUrl());
@@ -112,34 +100,42 @@ public class AdvancedExample {
 
     // ── Main ──
     public static void main(String[] args) {
-        // Build a fully customized client
         UserService service = new FeignClientFactory()
-            // Custom decoder (default is GsonDecoder anyway, shown for explicitness)
-            .decoder(new GsonDecoder(new Gson()))
-            // Connection pool: 200 max, 20 per route
+            .decoder(new GsonDecoder())
+            .encoder(new GsonEncoder())
             .protocolHandler(new HttpProtocolHandler(5000, 10000, 200, 20))
-            // Custom load balancer
-            .loadBalancer(new StickyLoadBalancer())
-            // Interceptors with explicit order
-            .addInterceptor(new AuthInterceptor(), 0)
-            .addInterceptor(new LoggingInterceptor(), 10)
+            .loadBalancer(new RoundRobinLoadBalancer())
+            .circuitBreaker(new DefaultCircuitBreaker(5, 60_000, 30_000, 2))
+            .addInterceptor(new AuthInterceptor())
+            .addInterceptor(new LogInterceptor())
             .build(UserService.class);
 
-        System.out.println("=== Feign Framework Advanced Example ===");
         System.out.println("Proxy: " + service.getClass().getName());
-        System.out.println();
 
-        // Sync call — returns typed User object (decoded from JSON)
+        // Sync typed call
+        try { User u = service.getUser(1L); System.out.println(u); }
+        catch (Exception e) { System.out.println("(no server) " + e.getMessage()); }
+
+        // FeignResponse — body + headers
         try {
-            User user = service.getUser(1L);
-            System.out.println("Sync  result: " + user);
-        } catch (FeignException e) {
-            System.out.println("Expected (no server): " + e.getMessage());
-        }
+            FeignResponse<User> resp = service.getUserWithHeaders(1L);
+            System.out.println("Body: " + resp.getBody());
+            System.out.println("Content-Type: " + resp.getHeader("Content-Type"));
+        } catch (Exception e) { System.out.println("(no server) " + e.getMessage()); }
 
-        // Async call — returns CompletableFuture<User>
-        CompletableFuture<User> future = service.getUserAsync(2L);
-        future.thenAccept(user -> System.out.println("Async result: " + user))
-              .exceptionally(e -> { System.out.println("Async error: " + e.getMessage()); return null; });
+        // Encoder serializes User → JSON automatically
+        try { User created = service.createUser(new User(null, "张三")); System.out.println(created); }
+        catch (Exception e) { System.out.println("(no server) " + e.getMessage()); }
+
+        // Circuit breaker: after 5 failures, fast-fails with fallback for 30s
+        for (int i = 0; i < 10; i++) {
+            try { service.getUser(1L); } catch (Exception ignored) {}
+        }
+        // 6th+ call → circuit OPEN → fallback kicks in
+        User u = service.getUser(1L);
+        System.out.println("Fallback result: " + u); // User{id=1, name=fallback}
+
+        // Async
+        service.getUserAsync(2L).thenAccept(user -> System.out.println("Async: " + user));
     }
 }

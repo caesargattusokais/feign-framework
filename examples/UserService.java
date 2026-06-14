@@ -2,29 +2,31 @@ package examples;
 
 import com.feign.framework.annotations.FeignClient;
 import com.feign.framework.annotations.FeignMethod;
+import com.feign.framework.annotations.Path;
+import com.feign.framework.annotations.Query;
 import com.feign.framework.http.HttpMethod;
+import com.feign.framework.FeignResponse;
+
+import java.util.List;
+import java.util.Map;
 
 /**
- * Example Feign client interface for user service.
+ * Basic Feign client interface for user service.
+ * Demonstrates @Path, @Query, @FeignResponse.
  */
-@FeignClient(name = "user-service", url = "http://localhost:8080")
+@FeignClient(name = "user-service", url = "http://localhost:8080/api")
 public interface UserService {
 
-    /**
-     * Get user by ID.
-     *
-     * @param id User ID
-     * @return User information
-     */
     @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
-    String getUser(Long id);
+    Map<String, Object> getUser(@Path("id") Long id);
 
-    /**
-     * Create a new user.
-     *
-     * @param user User information
-     * @return Created user information
-     */
     @FeignMethod(method = HttpMethod.POST, path = {"users"})
-    String createUser(String user);
+    Map<String, Object> createUser(Map<String, Object> user);
+
+    @FeignMethod(method = HttpMethod.GET, path = {"users"})
+    List<Map<String, Object>> listUsers(@Query("page") int page, @Query("size") int size);
+
+    /** Returns body + response headers */
+    @FeignMethod(method = HttpMethod.GET, path = {"users", "{id}"})
+    FeignResponse<Map<String, Object>> getUserWithHeaders(@Path("id") Long id);
 }
