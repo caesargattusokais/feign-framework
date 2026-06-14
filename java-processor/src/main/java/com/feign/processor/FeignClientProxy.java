@@ -88,34 +88,79 @@ public class FeignClientProxy implements InvocationHandler {
         if (methodAnn == null) throw new FeignException("Method " + method.getName() + " not @FeignMethod");
 
         try {
-            // 1. Build request (encode body via Encoder)
-            Request request = buildRequest(methodAnn, method, args);
-            // 2. interceptors before
-            for (FeignInterceptor i : interceptors) request = i.beforeExecute(request);
-            // 3. service discovery
-            String targetUrl = resolveViaDiscovery(request);
-            // 4. load balancer
-            targetUrl = resolveTargetUrl(request, targetUrl);
-            // 5. execute
-            Type returnType = method.getGenericReturnType();
+            // 1. Build path + headers + body (NO base URL yet)
+            String resolvedPath = resolvePath(methodAnn, method, args);
+            Map<String, String> headers = parseHeaders(methodAnn);
+            byte[] body = encodeBody(method, args);
 
+            // 2. Resolve base URL: annotation → discovery → load balancer
+            String baseUrl = resolveBaseUrl();
+
+            // 3. Assemble full URL
+            if (baseUrl.endsWith("/")) baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+            if (resolvedPath.startsWith("/")) resolvedPath = resolvedPath.substring(1);
+            String fullUrl = baseUrl + "/" + resolvedPath;
+
+            // 4. Build request
+            Request request = Request.of(methodAnn.method(), fullUrl, headers, body, new HashMap<>());
+
+            // 5. Interceptors before
+            for (FeignInterceptor i : interceptors) request = i.beforeExecute(request);
+
+            // 6. Execute
+            Type returnType = method.getGenericReturnType();
             if (isAsync(method)) {
-                return executeAsyncWithRetry(request, targetUrl, unwrapAsync(method));
+                return executeAsyncWithRetry(request, fullUrl, unwrapAsync(method));
             } else {
-                Response resp = executeSyncWithRetry(request, targetUrl);
+                Response resp = executeSyncWithRetry(request, fullUrl);
                 for (int i = interceptors.size() - 1; i >= 0; i--)
                     resp = interceptors.get(i).afterExecute(resp);
                 return decode(resp, returnType);
             }
         } catch (Exception e) {
-            if (fallbackClass != null) {
-                return invokeFallback(method, args);
-            }
+            if (fallbackClass != null) return invokeFallback(method, args);
             throw e;
         }
     }
 
-    // -- fallback --
+    // ── URL resolution pipeline ──
+
+    /** annotation URL → discovery → load balancer */
+    private String resolveBaseUrl() {
+        // 1. Start from annotation URL (may be empty if using discovery)
+        String url = metadata.getUrl();
+
+        // 2. Service discovery overrides
+        if (serviceDiscovery != null) {
+            List<String> instances = serviceDiscovery.getInstances(metadata.getServiceName());
+            if (instances != null && !instances.isEmpty()) {
+                url = instances.get(0); // seed, LB picks later
+            }
+        }
+
+        // 3. Load balancer selects one from available servers
+        if (loadBalancer != null) {
+            List<String> servers = getServers();
+            if (servers != null && !servers.isEmpty()) {
+                url = loadBalancer.select(null, servers);
+            }
+        }
+
+        if (url == null || url.isEmpty()) {
+            throw new FeignException("No URL configured for service: " + metadata.getServiceName()
+                + ". Set url in @FeignClient or configure ServiceDiscovery.");
+        }
+        return url;
+    }
+
+    // ── body encoding ──
+
+    private byte[] encodeBody(Method method, Object[] args) throws Exception {
+        Object bodyObj = extractBody(method, args);
+        if (bodyObj == null) return null;
+        Type bodyType = getBodyType(method);
+        return encoder.encode(bodyObj, bodyType);
+    }
 
     /** Inject a pre-built fallback instance (e.g., from Spring context). */
     public void setFallbackInstance(Object instance) {
@@ -137,25 +182,6 @@ public class FeignClientProxy implements InvocationHandler {
         return method.invoke(fallbackInstance, args);
     }
 
-    // -- request building (with Encoder) --
-
-    private Request buildRequest(FeignMethod methodAnn, Method method, Object[] args) throws Exception {
-        String path = resolvePath(methodAnn, method, args);
-        String fullUrl = metadata.getUrl() + "/" + path;
-        Map<String, String> headers = parseHeaders(methodAnn);
-
-        // Encode body using Encoder
-        byte[] body = null;
-        Object bodyObj = extractBody(method, args);
-        if (bodyObj != null) {
-            Type bodyType = getBodyType(method);
-            body = encoder.encode(bodyObj, bodyType);
-        }
-
-        return Request.of(methodAnn.method(), fullUrl, headers,
-            body != null ? new String(body) : null, new HashMap<>());
-    }
-
     private Type getBodyType(Method method) {
         Parameter[] params = method.getParameters();
         for (Parameter p : params) {
@@ -166,24 +192,14 @@ public class FeignClientProxy implements InvocationHandler {
         return method.getGenericReturnType();
     }
 
-    // -- service discovery --
-
-    private String resolveViaDiscovery(Request request) {
-        if (serviceDiscovery != null) {
-            List<String> instances = serviceDiscovery.getInstances(metadata.getServiceName());
-            if (instances != null && !instances.isEmpty()) {
-                return instances.get(0); // first instance, LB picks later
-            }
-        }
-        return request.getUrl();
-    }
-
     // -- sync / async execution --
 
-    private Response executeSyncWithRetry(Request req, String url) throws FeignException {
+    private Response executeSyncWithRetry(Request req, String originalUrl) throws FeignException {
         FeignException last = null;
         int max = retryPolicy != null ? retryPolicy.getMaxRetries() : 0;
         for (int a = 0; a <= max; a++) {
+            // Re-resolve base URL on retry — LB may pick a different healthy server
+            String url = a == 0 ? originalUrl : rebuildFullUrl(req, resolveBaseUrl());
             try {
                 Response resp = protocolHandler.execute(rebuildUrl(req, url));
                 markLbComplete(url);
@@ -197,7 +213,18 @@ public class FeignClientProxy implements InvocationHandler {
                 if (!shouldRetry(e, a)) throw last; sleep(retryPolicy.getRetryInterval());
             }
         }
-        throw last != null ? last : new FeignException("Max retries exceeded: " + url);
+        throw last != null ? last : new FeignException("Max retries exceeded");
+    }
+
+    /** Rebuild URL with a new base (from LB re-selection) but same path. */
+    private String rebuildFullUrl(Request req, String newBase) {
+        // Extract path from original URL: "http://host/api/users/1" → "/api/users/1"
+        String originalUrl = req.getUrl();
+        int pathStart = originalUrl.indexOf("/", originalUrl.indexOf("://") + 3);
+        String path = pathStart > 0 ? originalUrl.substring(pathStart) : "";
+        if (newBase.endsWith("/")) newBase = newBase.substring(0, newBase.length() - 1);
+        if (!path.startsWith("/")) path = "/" + path;
+        return newBase + path;
     }
 
     private CompletableFuture<Object> executeAsyncWithRetry(Request req, String url, Type innerType) {
@@ -271,16 +298,6 @@ public class FeignClientProxy implements InvocationHandler {
         return t.isPrimitive() || t == String.class || Number.class.isAssignableFrom(t) || Boolean.class.isAssignableFrom(t);
     }
 
-    // -- load balancing --
-
-    private String resolveTargetUrl(Request req, String baseUrl) {
-        if (loadBalancer != null) {
-            List<String> servers = getServers();
-            if (servers != null && !servers.isEmpty()) return loadBalancer.select(req, servers);
-        }
-        return baseUrl;
-    }
-
     private List<String> getServers() {
         if (serviceDiscovery != null) {
             List<String> instances = serviceDiscovery.getInstances(metadata.getServiceName());
@@ -303,7 +320,7 @@ public class FeignClientProxy implements InvocationHandler {
     }
     private Request rebuildUrl(Request orig, String newUrl) {
         return Request.of(orig.getMethod(), newUrl, orig.getHeaders(),
-            orig.getBody() != null ? new String(orig.getBody()) : null, orig.getQueryParams());
+            orig.getBody(), orig.getQueryParams());
     }
     private boolean isAsync(Method m) { return CompletableFuture.class.isAssignableFrom(m.getReturnType()); }
     private Type unwrapAsync(Method m) {

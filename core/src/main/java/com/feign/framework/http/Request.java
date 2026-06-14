@@ -13,14 +13,25 @@ import java.util.Map;
 public interface Request {
 
     /**
-     * Creates a Request instance with the given parameters.
-     *
-     * @param method the HTTP method
-     * @param url the request URL
-     * @param headers the request headers
-     * @param body the request body as string (may be null)
-     * @param queryParams the query parameters
-     * @return a new Request instance
+     * Creates a Request with a byte[] body (no encoding round-trip).
+     */
+    static Request of(HttpMethod method, String url, Map<String, String> headers,
+                      byte[] body, Map<String, String> queryParams) {
+        return new Request() {
+            @Override public HttpMethod getMethod() { return method; }
+            @Override public String getUrl() { return url; }
+            @Override public Map<String, String> getHeaders() {
+                return Collections.unmodifiableMap(new HashMap<>(headers != null ? headers : Map.of()));
+            }
+            @Override public byte[] getBody() { return body; }
+            @Override public Map<String, String> getQueryParams() {
+                return Collections.unmodifiableMap(new HashMap<>(queryParams != null ? queryParams : Map.of()));
+            }
+        };
+    }
+
+    /**
+     * Creates a Request with a String body (convenience). Prefer byte[] for binary data.
      */
     static Request of(HttpMethod method, String url, Map<String, String> headers,
                       String body, Map<String, String> queryParams) {
