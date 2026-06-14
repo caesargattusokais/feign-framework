@@ -5,40 +5,30 @@ import com.feign.framework.Response;
 import com.feign.framework.annotations.FeignMethod;
 import com.feign.framework.annotations.Path;
 import com.feign.framework.codec.Decoder;
+import com.feign.framework.codec.Encoder;
 import com.feign.framework.codec.GsonDecoder;
+import com.feign.framework.codec.GsonEncoder;
+import com.feign.framework.discovery.ServiceDiscovery;
 import com.feign.framework.http.Request;
 import com.feign.framework.interceptor.FeignInterceptor;
-import com.feign.framework.loadbalancer.LoadBalancer;
-import com.feign.framework.loadbalancer.LoadBalancerType;
-import com.feign.framework.protocol.GrpcProtocolHandler;
-import com.feign.framework.protocol.ProtocolHandler;
-import com.feign.framework.protocol.HttpProtocolHandler;
-import com.feign.framework.protocol.WebSocketProtocolHandler;
-import com.feign.framework.retry.RetryPolicy;
-import com.feign.framework.retry.DefaultRetryPolicy;
+import com.feign.framework.loadbalancer.*;
+import com.feign.framework.protocol.*;
+import com.feign.framework.retry.*;
 
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Parameter;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Proxy;
-import java.lang.reflect.Type;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.lang.reflect.*;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 /**
- * Dynamic proxy for Feign client interfaces.
+ * Dynamic proxy for @FeignClient interfaces.
  *
  * <h3>Execution pipeline</h3>
  * <pre>
- *   call → build request → interceptors(before) → load balancer
- *        → retry loop → protocolHandler → decoder → interceptors(after)
- *        → return typed object
+ * call → encode body → build request → interceptors(before) → service discovery
+ *      → load balancer → retry loop → protocolHandler → decoder → interceptors(after)
+ *      → return typed object
+ *      → (on total failure) → fallback
  * </pre>
  */
 public class FeignClientProxy implements InvocationHandler {
@@ -49,392 +39,290 @@ public class FeignClientProxy implements InvocationHandler {
     private final LoadBalancer loadBalancer;
     private final RetryPolicy retryPolicy;
     private final Decoder decoder;
-    private final int connectTimeout;
-    private final int readTimeout;
+    private final Encoder encoder;
+    private final ServiceDiscovery serviceDiscovery;
+    private final Class<?> fallbackClass;
+    private final int connectTimeout, readTimeout;
 
-    // ── constructors ──
+    // -- protocol registry --
+    static final List<ProtocolHandler> builtinHandlers = new ArrayList<>();
+    static {
+        builtinHandlers.add(new HttpProtocolHandler(5000, 5000));
+        builtinHandlers.add(new GrpcProtocolHandler());
+        builtinHandlers.add(new WebSocketProtocolHandler());
+    }
+    public static void addProtocolHandler(ProtocolHandler h) { builtinHandlers.add(h); }
+
+    // -- constructors --
 
     public FeignClientProxy(FeignClientMetadata metadata) {
-        this(metadata, new ArrayList<>(), null, null, null);
+        this(metadata, List.of(), null, null, null, null, null, Void.class);
     }
 
-    public FeignClientProxy(FeignClientMetadata metadata,
-                             List<FeignInterceptor> interceptors) {
-        this(metadata, interceptors, null, null, null);
-    }
-
-    /**
-     * Full constructor with all customization points.
-     *
-     * @param metadata       extracted from @FeignClient
-     * @param interceptors   interceptor chain (sorted by order())
-     * @param loadBalancer   custom load balancer, or null for default
-     * @param protocolHandler custom protocol handler, or null for HTTP default
-     * @param decoder        custom decoder, or null for Gson default
-     */
-    public FeignClientProxy(FeignClientMetadata metadata,
-                             List<FeignInterceptor> interceptors,
-                             LoadBalancer loadBalancer,
-                             ProtocolHandler protocolHandler,
-                             Decoder decoder) {
+    public FeignClientProxy(FeignClientMetadata metadata, List<FeignInterceptor> interceptors,
+                             LoadBalancer loadBalancer, ProtocolHandler protocolHandler,
+                             Decoder decoder, Encoder encoder,
+                             ServiceDiscovery serviceDiscovery, Class<?> fallbackClass) {
         this.metadata = metadata;
-
         this.interceptors = new ArrayList<>(interceptors);
         this.interceptors.sort(Comparator.comparingInt(FeignInterceptor::order));
-
         this.connectTimeout = metadata.getConnectTimeout() > 0 ? metadata.getConnectTimeout() : 5000;
         this.readTimeout = metadata.getReadTimeout() > 0 ? metadata.getReadTimeout() : 5000;
-
-        this.protocolHandler = protocolHandler != null
-            ? protocolHandler
-            : createProtocolHandler(metadata.getUrl());
-
-        this.loadBalancer = loadBalancer != null
-            ? loadBalancer
-            : createDefaultLoadBalancer();
-
-        this.retryPolicy = createRetryPolicy();
-
+        this.protocolHandler = protocolHandler != null ? protocolHandler : selectProtocol(metadata.getUrl());
+        this.loadBalancer = loadBalancer != null ? loadBalancer : defaultLb();
+        this.retryPolicy = defaultRetry();
         this.decoder = decoder != null ? decoder : new GsonDecoder();
+        this.encoder = encoder != null ? encoder : new GsonEncoder();
+        this.serviceDiscovery = serviceDiscovery;
+        this.fallbackClass = fallbackClass != null && fallbackClass != Void.class ? fallbackClass : null;
     }
 
-    public void addInterceptor(FeignInterceptor interceptor) {
-        this.interceptors.add(interceptor);
-        this.interceptors.sort(Comparator.comparingInt(FeignInterceptor::order));
-    }
-
-    // ── InvocationHandler ──
+    // -- InvocationHandler --
 
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-        if (method.getDeclaringClass() == Object.class) {
-            return method.invoke(this, args);
-        }
+        if (method.getDeclaringClass() == Object.class) return method.invoke(this, args);
 
         FeignMethod methodAnn = method.getAnnotation(FeignMethod.class);
-        if (methodAnn == null) {
-            throw new FeignException(
-                "Method '" + method.getName() + "' is not annotated with @FeignMethod");
-        }
+        if (methodAnn == null) throw new FeignException("Method " + method.getName() + " not @FeignMethod");
 
-        // 1. Build request
-        Request request = buildRequest(methodAnn, method, args);
+        try {
+            // 1. Build request (encode body via Encoder)
+            Request request = buildRequest(methodAnn, method, args);
+            // 2. interceptors before
+            for (FeignInterceptor i : interceptors) request = i.beforeExecute(request);
+            // 3. service discovery
+            String targetUrl = resolveViaDiscovery(request);
+            // 4. load balancer
+            targetUrl = resolveTargetUrl(request, targetUrl);
+            // 5. execute
+            Type returnType = method.getGenericReturnType();
 
-        // 2. Interceptors before
-        for (FeignInterceptor i : interceptors) {
-            request = i.beforeExecute(request);
-        }
-
-        // 3. Load balancer
-        String targetUrl = resolveTargetUrl(request);
-
-        // 4. Execute (sync or async) + decode
-        Type returnType = method.getGenericReturnType();
-
-        if (isAsyncReturnType(method)) {
-            // Unwrap CompletableFuture<User> → User type for decoding
-            Type innerType = unwrapAsyncReturnType(method);
-            return executeAsyncWithRetry(request, targetUrl, innerType);
-        } else {
-            Response response = executeSyncWithRetry(request, targetUrl);
-
-            // 5. Interceptors after (reverse)
-            for (int i = interceptors.size() - 1; i >= 0; i--) {
-                response = interceptors.get(i).afterExecute(response);
+            if (isAsync(method)) {
+                return executeAsyncWithRetry(request, targetUrl, unwrapAsync(method));
+            } else {
+                Response resp = executeSyncWithRetry(request, targetUrl);
+                for (int i = interceptors.size() - 1; i >= 0; i--)
+                    resp = interceptors.get(i).afterExecute(resp);
+                return decode(resp, returnType);
             }
-
-            // 6. Decode
-            return decode(response, returnType);
-        }
-    }
-
-    // ── sync execution + retry ──
-
-    private Response executeSyncWithRetry(Request request, String targetUrl) throws FeignException {
-        FeignException lastException = null;
-        int maxRetries = retryPolicy != null ? retryPolicy.getMaxRetries() : 0;
-
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                Response resp = protocolHandler.execute(rebuildUrl(request, targetUrl));
-                markLbComplete(targetUrl);
-                return resp;
-            } catch (FeignException e) {
-                markLbComplete(targetUrl);
-                lastException = e;
-                notifyError(request, e);
-                if (!shouldRetry(e, attempt)) throw e;
-                sleep(retryPolicy.getRetryInterval());
-            } catch (Exception e) {
-                markLbComplete(targetUrl);
-                lastException = new FeignException("Request failed: " + targetUrl, e);
-                notifyError(request, lastException);
-                if (!shouldRetry(e, attempt)) throw lastException;
-                sleep(retryPolicy.getRetryInterval());
+        } catch (Exception e) {
+            if (fallbackClass != null) {
+                return invokeFallback(method, args);
             }
+            throw e;
         }
-        throw lastException != null ? lastException
-            : new FeignException("Max retries exceeded: " + targetUrl);
     }
 
-    // ── async execution + retry ──
+    // -- fallback --
 
-    private CompletableFuture<Object> executeAsyncWithRetry(
-            Request request, String targetUrl, Type innerType) {
-        return executeAsyncWithRetry(request, targetUrl, 0, innerType,
-                new CompletableFuture<>());
+    private Object invokeFallback(Method method, Object[] args) throws Exception {
+        Object fallbackInstance = fallbackClass.getDeclaredConstructor().newInstance();
+        return method.invoke(fallbackInstance, args);
     }
 
-    private CompletableFuture<Object> executeAsyncWithRetry(
-            Request request, String targetUrl, int attempt, Type innerType,
-            CompletableFuture<Object> resultFuture) {
+    // -- request building (with Encoder) --
 
-        protocolHandler.executeAsync(rebuildUrl(request, targetUrl))
-            .thenAccept(response -> {
-                // afterExecute (reverse)
-                Response processed = response;
-                for (int i = interceptors.size() - 1; i >= 0; i--) {
-                    processed = interceptors.get(i).afterExecute(processed);
-                }
-                // decode
-                try {
-                    resultFuture.complete(decode(processed, innerType));
-                } catch (Exception e) {
-                    resultFuture.completeExceptionally(e);
-                }
-            })
-            .exceptionally(throwable -> {
-                Throwable cause = throwable.getCause() != null ? throwable.getCause() : throwable;
-                FeignException fe = (cause instanceof FeignException)
-                    ? (FeignException) cause
-                    : new FeignException("Async request failed: " + targetUrl, cause);
-
-                notifyError(request, fe);
-
-                if (shouldRetry(cause, attempt)) {
-                    sleep(retryPolicy.getRetryInterval());
-                    executeAsyncWithRetry(request, targetUrl, attempt + 1, innerType, resultFuture);
-                } else {
-                    resultFuture.completeExceptionally(fe);
-                }
-                return null;
-            });
-
-        return resultFuture;
-    }
-
-    // ── decode ──
-
-    /**
-     * Decode a Response into the target type.
-     *
-     * <pre>
-     *   Response → return as-is
-     *   String   → response.getBodyAsString()
-     *   User     → decoder.decode(response, User.class)
-     *   void     → null
-     * </pre>
-     */
-    private Object decode(Response response, Type type) throws Exception {
-        if (type == void.class || type == Void.class) {
-            return null;
-        }
-        if (type == Response.class) {
-            return response;
-        }
-        if (!response.successful()) {
-            throw new FeignException(response.statusCode(), response.getUrl(),
-                "Request failed: " + response.getBodyAsString());
-        }
-        return decoder.decode(response, type);
-    }
-
-    // ── request building ──
-
-    private Request buildRequest(FeignMethod methodAnn, Method method, Object[] args) {
-        String resolvedPath = resolvePath(methodAnn, method, args);
-        String fullUrl = metadata.getUrl() + "/" + resolvedPath;
+    private Request buildRequest(FeignMethod methodAnn, Method method, Object[] args) throws Exception {
+        String path = resolvePath(methodAnn, method, args);
+        String fullUrl = metadata.getUrl() + "/" + path;
         Map<String, String> headers = parseHeaders(methodAnn);
-        String body = extractBody(method, args);
-        return Request.of(methodAnn.method(), fullUrl, headers, body, new HashMap<>());
+
+        // Encode body using Encoder
+        byte[] body = null;
+        Object bodyObj = extractBody(method, args);
+        if (bodyObj != null) {
+            Type bodyType = getBodyType(method);
+            body = encoder.encode(bodyObj, bodyType);
+        }
+
+        return Request.of(methodAnn.method(), fullUrl, headers,
+            body != null ? new String(body) : null, new HashMap<>());
     }
 
-    private String resolvePath(FeignMethod methodAnn, Method method, Object[] args) {
-        String[] segments = methodAnn.path();
-        if (segments.length == 0) return method.getName();
-        String path = String.join("/", segments);
-        Map<String, String> pathParams = new HashMap<>();
-        Parameter[] parameters = method.getParameters();
-        for (int i = 0; i < parameters.length; i++) {
-            Path pathAnn = parameters[i].getAnnotation(Path.class);
-            if (pathAnn != null && args != null && i < args.length && args[i] != null) {
-                pathParams.put(pathAnn.value(), args[i].toString());
-            }
-        }
-        for (Map.Entry<String, String> e : pathParams.entrySet()) {
-            path = path.replace("{" + e.getKey() + "}", e.getValue());
-        }
-        return path;
-    }
-
-    private Map<String, String> parseHeaders(FeignMethod methodAnn) {
-        Map<String, String> headers = new HashMap<>();
-        for (String h : methodAnn.headers()) {
-            int colon = h.indexOf(':');
-            if (colon > 0) {
-                headers.put(h.substring(0, colon).trim(), h.substring(colon + 1).trim());
-            }
-        }
-        return headers;
-    }
-
-    private String extractBody(Method method, Object[] args) {
-        if (args == null) return null;
+    private Type getBodyType(Method method) {
         Parameter[] params = method.getParameters();
-        for (int i = 0; i < params.length; i++) {
-            if (params[i].getAnnotation(Path.class) == null
-                && args[i] != null
-                && !isPrimitiveOrWrapper(params[i].getType())) {
-                return args[i].toString();
+        for (Parameter p : params) {
+            if (p.getAnnotation(Path.class) == null && !isPrimitiveOrWrapper(p.getType())) {
+                return p.getParameterizedType();
             }
         }
-        return null;
+        return method.getGenericReturnType();
     }
 
-    private boolean isPrimitiveOrWrapper(Class<?> type) {
-        return type.isPrimitive()
-            || type == String.class
-            || Number.class.isAssignableFrom(type)
-            || Boolean.class.isAssignableFrom(type);
-    }
+    // -- service discovery --
 
-    // ── load balancing ──
-
-    private String resolveTargetUrl(Request request) {
-        if (loadBalancer != null) {
-            List<String> servers = getServers();
-            if (servers != null && !servers.isEmpty()) {
-                return loadBalancer.select(request, servers);
+    private String resolveViaDiscovery(Request request) {
+        if (serviceDiscovery != null) {
+            List<String> instances = serviceDiscovery.getInstances(metadata.getServiceName());
+            if (instances != null && !instances.isEmpty()) {
+                return instances.get(0); // first instance, LB picks later
             }
         }
         return request.getUrl();
     }
 
-    private List<String> getServers() {
-        if (metadata.getUrl() != null && !metadata.getUrl().isEmpty()) {
-            return Arrays.asList(metadata.getUrl());
+    // -- sync / async execution --
+
+    private Response executeSyncWithRetry(Request req, String url) throws FeignException {
+        FeignException last = null;
+        int max = retryPolicy != null ? retryPolicy.getMaxRetries() : 0;
+        for (int a = 0; a <= max; a++) {
+            try {
+                Response resp = protocolHandler.execute(rebuildUrl(req, url));
+                markLbComplete(url);
+                return resp;
+            } catch (FeignException e) {
+                markLbComplete(url); last = e; notifyError(req, e);
+                if (!shouldRetry(e, a)) throw e; sleep(retryPolicy.getRetryInterval());
+            } catch (Exception e) {
+                markLbComplete(url); last = new FeignException("Request failed: " + url, e);
+                notifyError(req, last);
+                if (!shouldRetry(e, a)) throw last; sleep(retryPolicy.getRetryInterval());
+            }
         }
+        throw last != null ? last : new FeignException("Max retries exceeded: " + url);
+    }
+
+    private CompletableFuture<Object> executeAsyncWithRetry(Request req, String url, Type innerType) {
+        return executeAsyncWithRetry(req, url, 0, innerType, new CompletableFuture<>());
+    }
+
+    private CompletableFuture<Object> executeAsyncWithRetry(Request req, String url, int attempt,
+                                                             Type innerType, CompletableFuture<Object> f) {
+        protocolHandler.executeAsync(rebuildUrl(req, url)).thenAccept(resp -> {
+            Response p = resp;
+            for (int i = interceptors.size() - 1; i >= 0; i--) p = interceptors.get(i).afterExecute(p);
+            try { f.complete(decode(p, innerType)); } catch (Exception e) { f.completeExceptionally(e); }
+        }).exceptionally(t -> {
+            Throwable c = t.getCause() != null ? t.getCause() : t;
+            FeignException fe = c instanceof FeignException ? (FeignException) c
+                : new FeignException("Async failed: " + url, c);
+            notifyError(req, fe);
+            if (shouldRetry(c, attempt)) {
+                sleep(retryPolicy.getRetryInterval());
+                executeAsyncWithRetry(req, url, attempt + 1, innerType, f);
+            } else f.completeExceptionally(fe);
+            return null;
+        });
+        return f;
+    }
+
+    // -- decode / encode helpers --
+
+    private Object decode(Response resp, Type type) throws Exception {
+        if (type == void.class || type == Void.class) return null;
+        if (type == Response.class) return resp;
+        if (!resp.successful()) throw new FeignException(resp.statusCode(), resp.getUrl(), resp.getBodyAsString());
+        return decoder.decode(resp, type);
+    }
+
+    // -- path / headers / body extraction --
+
+    private String resolvePath(FeignMethod mAnn, Method method, Object[] args) {
+        String[] segs = mAnn.path();
+        if (segs.length == 0) return method.getName();
+        String path = String.join("/", segs);
+        Map<String, String> vars = new HashMap<>();
+        Parameter[] params = method.getParameters();
+        for (int i = 0; i < params.length; i++) {
+            Path p = params[i].getAnnotation(Path.class);
+            if (p != null && args != null && i < args.length && args[i] != null)
+                vars.put(p.value(), args[i].toString());
+        }
+        for (var e : vars.entrySet()) path = path.replace("{" + e.getKey() + "}", e.getValue());
+        return path;
+    }
+
+    private Map<String, String> parseHeaders(FeignMethod mAnn) {
+        Map<String, String> h = new HashMap<>();
+        for (String s : mAnn.headers()) {
+            int c = s.indexOf(':'); if (c > 0) h.put(s.substring(0, c).trim(), s.substring(c + 1).trim());
+        }
+        return h;
+    }
+
+    private Object extractBody(Method method, Object[] args) {
+        if (args == null) return null;
+        Parameter[] params = method.getParameters();
+        for (int i = 0; i < params.length; i++)
+            if (params[i].getAnnotation(Path.class) == null && args[i] != null && !isPrimitiveOrWrapper(params[i].getType()))
+                return args[i];
         return null;
     }
 
-    // ── retry ──
+    private boolean isPrimitiveOrWrapper(Class<?> t) {
+        return t.isPrimitive() || t == String.class || Number.class.isAssignableFrom(t) || Boolean.class.isAssignableFrom(t);
+    }
 
-    private boolean shouldRetry(Throwable e, int attempt) {
-        if (retryPolicy == null) return false;
-        if (e instanceof Exception) {
-            return retryPolicy.canRetry((Exception) e, attempt);
+    // -- load balancing --
+
+    private String resolveTargetUrl(Request req, String baseUrl) {
+        if (loadBalancer != null) {
+            List<String> servers = getServers();
+            if (servers != null && !servers.isEmpty()) return loadBalancer.select(req, servers);
         }
-        return false;
+        return baseUrl;
     }
 
-    private void sleep(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-    }
-
-    private void notifyError(Request request, FeignException e) {
-        for (FeignInterceptor i : interceptors) {
-            i.onError(request, e);
+    private List<String> getServers() {
+        if (serviceDiscovery != null) {
+            List<String> instances = serviceDiscovery.getInstances(metadata.getServiceName());
+            if (instances != null && !instances.isEmpty()) return instances;
         }
+        if (metadata.getUrl() != null && !metadata.getUrl().isEmpty())
+            return List.of(metadata.getUrl());
+        return null;
     }
 
+    // -- retry --
+
+    private boolean shouldRetry(Throwable e, int a) {
+        return retryPolicy != null && e instanceof Exception && retryPolicy.canRetry((Exception) e, a);
+    }
+    private void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
+    private void notifyError(Request req, FeignException e) { interceptors.forEach(i -> i.onError(req, e)); }
     private void markLbComplete(String url) {
-        if (loadBalancer instanceof com.feign.framework.loadbalancer.LeastConnectionsLoadBalancer lb) {
-            lb.markComplete(url);
-        }
+        if (loadBalancer instanceof LeastConnectionsLoadBalancer lb) lb.markComplete(url);
     }
-
-    // ── helpers ──
-
-    private Request rebuildUrl(Request original, String newUrl) {
-        return Request.of(original.getMethod(), newUrl, original.getHeaders(),
-            original.getBody() != null ? new String(original.getBody()) : null,
-            original.getQueryParams());
+    private Request rebuildUrl(Request orig, String newUrl) {
+        return Request.of(orig.getMethod(), newUrl, orig.getHeaders(),
+            orig.getBody() != null ? new String(orig.getBody()) : null, orig.getQueryParams());
     }
-
-    private boolean isAsyncReturnType(Method method) {
-        return CompletableFuture.class.isAssignableFrom(method.getReturnType());
-    }
-
-    /** Unwrap CompletableFuture&lt;T&gt; → T */
-    private Type unwrapAsyncReturnType(Method method) {
-        Type genericType = method.getGenericReturnType();
-        if (genericType instanceof ParameterizedType) {
-            Type[] args = ((ParameterizedType) genericType).getActualTypeArguments();
-            if (args.length > 0) return args[0];
-        }
+    private boolean isAsync(Method m) { return CompletableFuture.class.isAssignableFrom(m.getReturnType()); }
+    private Type unwrapAsync(Method m) {
+        Type gt = m.getGenericReturnType();
+        if (gt instanceof ParameterizedType pt) { Type[] a = pt.getActualTypeArguments(); if (a.length > 0) return a[0]; }
         return Response.class;
     }
 
     @SuppressWarnings("unchecked")
-    public <T> T createProxy(Class<T> interfaceClass) {
-        return (T) Proxy.newProxyInstance(
-            interfaceClass.getClassLoader(),
-            new Class<?>[] { interfaceClass },
-            this
-        );
+    public <T> T createProxy(Class<T> c) {
+        return (T) Proxy.newProxyInstance(c.getClassLoader(), new Class<?>[]{c}, this);
     }
 
-    // ── defaults ──
+    // -- defaults --
 
-    /**
-     * Built-in protocol handlers. The proxy iterates these to find one whose
-     * {@link ProtocolHandler#scheme()} matches the URL prefix.
-     *
-     * <p>To add a custom handler, instantiate it and pass into the constructor,
-     * or call {@link #addProtocolHandler(ProtocolHandler)}.
-     */
-    private static final List<ProtocolHandler> builtinHandlers = new ArrayList<>();
-
-    static {
-        builtinHandlers.add(new HttpProtocolHandler(5000, 5000));  // scheme = "http"
-        builtinHandlers.add(new GrpcProtocolHandler());             // scheme = "grpc"
-        builtinHandlers.add(new WebSocketProtocolHandler());        // scheme = "ws"
-    }
-
-    /** Register a custom protocol handler for auto-detection via {@link ProtocolHandler#scheme()}. */
-    public static void addProtocolHandler(ProtocolHandler handler) {
-        builtinHandlers.add(handler);
-    }
-
-    /**
-     * Auto-select ProtocolHandler by matching URL against each handler's {@code scheme()}.
-     * TLS variants (https, wss) are auto-matched to their plain counterparts.
-     */
-    private ProtocolHandler createProtocolHandler(String url) {
-        if (url == null || !url.contains("://")) {
-            return builtinHandlers.get(0); // HTTP fallback
+    private ProtocolHandler selectProtocol(String url) {
+        if (url == null || !url.contains("://")) return builtinHandlers.get(0);
+        for (ProtocolHandler h : builtinHandlers) {
+            String s = h.scheme();
+            if (url.startsWith(s + "://") || url.startsWith(s + "s://")) return h;
         }
-
-        for (ProtocolHandler handler : builtinHandlers) {
-            String scheme = handler.scheme();
-            if (url.startsWith(scheme + "://") || url.startsWith(scheme + "s://")) {
-                return handler;
-            }
-        }
-        return builtinHandlers.get(0); // HTTP fallback
+        return builtinHandlers.get(0);
     }
 
-    private LoadBalancer createDefaultLoadBalancer() {
-        LoadBalancerType type = metadata.getLoadBalancerType();
-        if (type == null) return null;
-        return switch (type) {
-            case ROUND_ROBIN -> new com.feign.framework.loadbalancer.RoundRobinLoadBalancer();
-            case RANDOM      -> new com.feign.framework.loadbalancer.RandomLoadBalancer();
-            case LEAST_CONNECTIONS -> new com.feign.framework.loadbalancer.LeastConnectionsLoadBalancer();
+    private LoadBalancer defaultLb() {
+        LoadBalancerType t = metadata.getLoadBalancerType();
+        if (t == null) return null;
+        return switch (t) {
+            case ROUND_ROBIN -> new RoundRobinLoadBalancer();
+            case RANDOM -> new RandomLoadBalancer();
+            case LEAST_CONNECTIONS -> new LeastConnectionsLoadBalancer();
         };
     }
 
-    private RetryPolicy createRetryPolicy() {
+    private RetryPolicy defaultRetry() {
         DefaultRetryPolicy p = new DefaultRetryPolicy();
         p.setMaxRetries(Math.max(0, metadata.getMaxRetries()));
         p.setRetryInterval(Math.max(0, metadata.getRetryInterval()));

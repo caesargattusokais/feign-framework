@@ -50,6 +50,10 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
 
         FeignClientFactory factory = new FeignClientFactory();
 
+        // ── Encoder ──
+        com.feign.framework.codec.Encoder encoder = resolveEncoder(config);
+        factory.encoder(encoder);
+
         // ── Decoder ──
         Decoder decoder = resolveDecoder(config);
         factory.decoder(decoder);
@@ -61,6 +65,12 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
         // ── LoadBalancer ──
         LoadBalancer lb = resolveLoadBalancer(config);
         factory.loadBalancer(lb);
+
+        // ── ServiceDiscovery ──
+        if (config.getDiscoveryBean() != null && beanFactory.containsBean(config.getDiscoveryBean())) {
+            factory.serviceDiscovery(beanFactory.getBean(config.getDiscoveryBean(),
+                com.feign.framework.discovery.ServiceDiscovery.class));
+        }
 
         // ── Interceptors (by bean name) ──
         List<FeignInterceptor> interceptors = resolveInterceptors(config);
@@ -82,6 +92,13 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
 
 
     // ── resolvers ──
+
+    private com.feign.framework.codec.Encoder resolveEncoder(FeignProperties.ClientConfig config) {
+        if (config.getEncoder() != null && beanFactory.containsBean(config.getEncoder())) {
+            return beanFactory.getBean(config.getEncoder(), com.feign.framework.codec.Encoder.class);
+        }
+        return new com.feign.framework.codec.GsonEncoder();
+    }
 
     private Decoder resolveDecoder(FeignProperties.ClientConfig config) {
         Decoder defaultDecoder = beanFactory.getBean(Decoder.class);

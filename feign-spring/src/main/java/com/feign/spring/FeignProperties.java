@@ -56,10 +56,12 @@ public class FeignProperties {
         private String loadBalancer;       // ROUND_ROBIN | RANDOM | LEAST_CONNECTIONS
         private String loadBalancerBean;   // Spring bean name for custom LoadBalancer
         private String decoder;            // "gson" | "jackson" | bean name
+        private String encoder;            // "gson" | "jackson" | bean name
         private String protocol;           // "http" | "grpc" | "ws"
         private List<String> interceptors; // Spring bean names
         private ConnectionPool connectionPool;
         private String protocolHandlerBean; // Custom ProtocolHandler bean name
+        private String discoveryBean;       // ServiceDiscovery bean name
 
         // --- merge: specific overrides default ---
         public ClientConfig merge(ClientConfig specific) {
@@ -76,6 +78,8 @@ public class FeignProperties {
             merged.interceptors = specific.interceptors != null ? specific.interceptors : this.interceptors;
             merged.connectionPool = specific.connectionPool != null ? specific.connectionPool : this.connectionPool;
             merged.protocolHandlerBean = specific.protocolHandlerBean != null ? specific.protocolHandlerBean : this.protocolHandlerBean;
+            merged.encoder = specific.encoder != null ? specific.encoder : this.encoder;
+            merged.discoveryBean = specific.discoveryBean != null ? specific.discoveryBean : this.discoveryBean;
             return merged;
         }
 
@@ -102,5 +106,7 @@ public class FeignProperties {
         public List<String> getInterceptors() { return interceptors; } public void setInterceptors(List<String> v) { this.interceptors = v; }
         public ConnectionPool getConnectionPool() { return connectionPool; } public void setConnectionPool(ConnectionPool v) { this.connectionPool = v; }
         public String getProtocolHandlerBean() { return protocolHandlerBean; } public void setProtocolHandlerBean(String v) { this.protocolHandlerBean = v; }
+        public String getEncoder() { return encoder; } public void setEncoder(String v) { this.encoder = v; }
+        public String getDiscoveryBean() { return discoveryBean; } public void setDiscoveryBean(String v) { this.discoveryBean = v; }
     }
 }

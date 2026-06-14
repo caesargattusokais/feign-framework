@@ -42,4 +42,7 @@ public @interface FeignClient {
 
     /** Delay between retries in milliseconds. */
     long retryInterval() default 1000;
+
+    /** Fallback class — must implement this interface. Called when all retries fail. */
+    Class<?> fallback() default Void.class;
 }
