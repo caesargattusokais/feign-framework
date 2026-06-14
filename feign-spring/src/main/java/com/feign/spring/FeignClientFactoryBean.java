@@ -72,6 +72,14 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
                 com.feign.framework.discovery.ServiceDiscovery.class));
         }
 
+        // ── CircuitBreaker (optional) ──
+        if (config.getCircuitBreakerBean() != null && beanFactory.containsBean(config.getCircuitBreakerBean())) {
+            factory.circuitBreaker(beanFactory.getBean(config.getCircuitBreakerBean(),
+                com.feign.framework.circuit.CircuitBreaker.class));
+        } else if (config.isCircuitBreakerEnabled()) {
+            factory.circuitBreaker(new com.feign.framework.circuit.DefaultCircuitBreaker());
+        }
+
         // ── Interceptors (by bean name) ──
         List<FeignInterceptor> interceptors = resolveInterceptors(config);
         for (FeignInterceptor interceptor : interceptors) {

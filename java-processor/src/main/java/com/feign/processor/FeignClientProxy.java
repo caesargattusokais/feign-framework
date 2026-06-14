@@ -5,6 +5,7 @@ import com.feign.framework.Response;
 import com.feign.framework.annotations.FeignMethod;
 import com.feign.framework.annotations.Path;
 import com.feign.framework.annotations.Query;
+import com.feign.framework.circuit.CircuitBreaker;
 import com.feign.framework.codec.Decoder;
 import com.feign.framework.codec.Encoder;
 import com.feign.framework.codec.GsonDecoder;
@@ -43,6 +44,7 @@ public class FeignClientProxy implements InvocationHandler {
     private final Decoder decoder;
     private final Encoder encoder;
     private final ServiceDiscovery serviceDiscovery;
+    private final CircuitBreaker circuitBreaker;
     private final Class<?> fallbackClass;
     private Object fallbackInstance; // lazy singleton — holds the fallback implementation
     private final int connectTimeout, readTimeout;
@@ -59,13 +61,14 @@ public class FeignClientProxy implements InvocationHandler {
     // -- constructors --
 
     public FeignClientProxy(FeignClientMetadata metadata) {
-        this(metadata, List.of(), null, null, null, null, null, Void.class);
+        this(metadata, null, null, null, null, null, null, null, Void.class);
     }
 
     public FeignClientProxy(FeignClientMetadata metadata, List<FeignInterceptor> interceptors,
                              LoadBalancer loadBalancer, ProtocolHandler protocolHandler,
                              Decoder decoder, Encoder encoder,
-                             ServiceDiscovery serviceDiscovery, Class<?> fallbackClass) {
+                             ServiceDiscovery serviceDiscovery, CircuitBreaker circuitBreaker,
+                             Class<?> fallbackClass) {
         this.metadata = metadata;
         this.interceptors = new ArrayList<>(interceptors);
         this.interceptors.sort(Comparator.comparingInt(FeignInterceptor::order));
@@ -77,6 +80,7 @@ public class FeignClientProxy implements InvocationHandler {
         this.decoder = decoder != null ? decoder : new GsonDecoder();
         this.encoder = encoder != null ? encoder : new GsonEncoder();
         this.serviceDiscovery = serviceDiscovery;
+        this.circuitBreaker = circuitBreaker;
         this.fallbackClass = fallbackClass != null && fallbackClass != Void.class ? fallbackClass : null;
     }
 
@@ -90,6 +94,12 @@ public class FeignClientProxy implements InvocationHandler {
         if (methodAnn == null) throw new FeignException("Method " + method.getName() + " not @FeignMethod");
 
         try {
+            // 0. Circuit breaker — fast-fail if open
+            if (circuitBreaker != null && !circuitBreaker.allowRequest()) {
+                if (fallbackClass != null) return invokeFallback(method, args);
+                throw new FeignException("Circuit breaker OPEN for " + metadata.getServiceName());
+            }
+
             // 1. Build path + query params + headers + body (NO base URL yet)
             String resolvedPath = resolvePath(methodAnn, method, args);
             Map<String, String> queryParams = extractQueryParams(method, args);
@@ -240,13 +250,16 @@ public class FeignClientProxy implements InvocationHandler {
             try {
                 Response resp = protocolHandler.execute(rebuildUrl(req, url));
                 markLbComplete(url);
+                if (circuitBreaker != null) circuitBreaker.onSuccess();
                 return resp;
             } catch (FeignException e) {
                 markLbComplete(url); last = e; notifyError(req, e);
+                if (circuitBreaker != null) circuitBreaker.onFailure();
                 if (!shouldRetry(e, a)) throw e; sleep(retryPolicy.getRetryInterval());
             } catch (Exception e) {
                 markLbComplete(url); last = new FeignException("Request failed: " + url, e);
                 notifyError(req, last);
+                if (circuitBreaker != null) circuitBreaker.onFailure();
                 if (!shouldRetry(e, a)) throw last; sleep(retryPolicy.getRetryInterval());
             }
         }
@@ -294,6 +307,14 @@ public class FeignClientProxy implements InvocationHandler {
         if (type == void.class || type == Void.class) return null;
         if (type == Response.class) return resp;
         if (!resp.successful()) throw new FeignException(resp.statusCode(), resp.getUrl(), resp.getBodyAsString());
+
+        // FeignResponse<T> → wrap decoded body + response headers
+        if (type instanceof ParameterizedType pt && pt.getRawType() == com.feign.framework.FeignResponse.class) {
+            Type innerType = pt.getActualTypeArguments()[0];
+            Object body = decoder.decode(resp, innerType);
+            return new com.feign.framework.FeignResponse<>(body, resp.headers());
+        }
+
         return decoder.decode(resp, type);
     }
 

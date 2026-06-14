@@ -2,6 +2,7 @@ package com.feign.processor;
 
 import com.feign.framework.FeignException;
 import com.feign.framework.annotations.FeignClient;
+import com.feign.framework.circuit.CircuitBreaker;
 import com.feign.framework.codec.Decoder;
 import com.feign.framework.codec.Encoder;
 import com.feign.framework.discovery.ServiceDiscovery;
@@ -43,6 +44,9 @@ public class FeignClientFactory {
     public FeignClientFactory loadBalancer(LoadBalancer lb)      { this.loadBalancer = lb; return this; }
     public FeignClientFactory serviceDiscovery(ServiceDiscovery sd) { this.serviceDiscovery = sd; return this; }
 
+    private CircuitBreaker circuitBreaker;
+    public FeignClientFactory circuitBreaker(CircuitBreaker cb) { this.circuitBreaker = cb; return this; }
+
     private Object fallbackInstance;
     /** Set a pre-built fallback instance (e.g., from Spring context). */
     public FeignClientFactory fallbackInstance(Object instance) {
@@ -82,7 +86,7 @@ public class FeignClientFactory {
 
         FeignClientProxy handler = new FeignClientProxy(
             metadata, interceptors, loadBalancer, protocolHandler,
-            decoder, encoder, serviceDiscovery, ann.fallback());
+            decoder, encoder, serviceDiscovery, circuitBreaker, ann.fallback());
 
         if (fallbackInstance != null) {
             handler.setFallbackInstance(fallbackInstance);

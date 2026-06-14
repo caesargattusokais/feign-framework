@@ -62,6 +62,8 @@ public class FeignProperties {
         private ConnectionPool connectionPool;
         private String protocolHandlerBean; // Custom ProtocolHandler bean name
         private String discoveryBean;       // ServiceDiscovery bean name
+        private Boolean circuitBreakerEnabled; // enable default circuit breaker
+        private String circuitBreakerBean;  // custom CircuitBreaker bean name
 
         // --- merge: specific overrides default ---
         public ClientConfig merge(ClientConfig specific) {
@@ -80,6 +82,8 @@ public class FeignProperties {
             merged.protocolHandlerBean = specific.protocolHandlerBean != null ? specific.protocolHandlerBean : this.protocolHandlerBean;
             merged.encoder = specific.encoder != null ? specific.encoder : this.encoder;
             merged.discoveryBean = specific.discoveryBean != null ? specific.discoveryBean : this.discoveryBean;
+            merged.circuitBreakerEnabled = specific.circuitBreakerEnabled != null ? specific.circuitBreakerEnabled : this.circuitBreakerEnabled;
+            merged.circuitBreakerBean = specific.circuitBreakerBean != null ? specific.circuitBreakerBean : this.circuitBreakerBean;
             return merged;
         }
 
@@ -108,5 +112,7 @@ public class FeignProperties {
         public String getProtocolHandlerBean() { return protocolHandlerBean; } public void setProtocolHandlerBean(String v) { this.protocolHandlerBean = v; }
         public String getEncoder() { return encoder; } public void setEncoder(String v) { this.encoder = v; }
         public String getDiscoveryBean() { return discoveryBean; } public void setDiscoveryBean(String v) { this.discoveryBean = v; }
+        public Boolean isCircuitBreakerEnabled() { return circuitBreakerEnabled; } public void setCircuitBreakerEnabled(Boolean v) { this.circuitBreakerEnabled = v; }
+        public String getCircuitBreakerBean() { return circuitBreakerBean; } public void setCircuitBreakerBean(String v) { this.circuitBreakerBean = v; }
     }
 }
