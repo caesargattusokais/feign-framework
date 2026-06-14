@@ -4,6 +4,7 @@ import com.feign.framework.FeignException;
 import com.feign.framework.Response;
 import com.feign.framework.annotations.FeignMethod;
 import com.feign.framework.annotations.Path;
+import com.feign.framework.annotations.Query;
 import com.feign.framework.codec.Decoder;
 import com.feign.framework.codec.Encoder;
 import com.feign.framework.codec.GsonDecoder;
@@ -15,6 +16,7 @@ import com.feign.framework.loadbalancer.*;
 import com.feign.framework.protocol.*;
 import com.feign.framework.retry.*;
 
+import java.io.UnsupportedEncodingException;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -88,10 +90,11 @@ public class FeignClientProxy implements InvocationHandler {
         if (methodAnn == null) throw new FeignException("Method " + method.getName() + " not @FeignMethod");
 
         try {
-            // 1. Build path + headers + body (NO base URL yet)
+            // 1. Build path + query params + headers + body (NO base URL yet)
             String resolvedPath = resolvePath(methodAnn, method, args);
+            Map<String, String> queryParams = extractQueryParams(method, args);
             Map<String, String> headers = parseHeaders(methodAnn);
-            byte[] body = encodeBody(method, args);
+            byte[] body = encodeBody(method, args, methodAnn);
 
             // 2. Resolve base URL: annotation → discovery → load balancer
             String baseUrl = resolveBaseUrl();
@@ -100,9 +103,14 @@ public class FeignClientProxy implements InvocationHandler {
             if (baseUrl.endsWith("/")) baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
             if (resolvedPath.startsWith("/")) resolvedPath = resolvedPath.substring(1);
             String fullUrl = baseUrl + "/" + resolvedPath;
+            if (!queryParams.isEmpty()) {
+                fullUrl += "?" + queryParams.entrySet().stream()
+                    .map(e -> e.getKey() + "=" + e.getValue())
+                    .reduce((a, b) -> a + "&" + b).orElse("");
+            }
 
             // 4. Build request
-            Request request = Request.of(methodAnn.method(), fullUrl, headers, body, new HashMap<>());
+            Request request = Request.of(methodAnn.method(), fullUrl, headers, body, queryParams);
 
             // 5. Interceptors before
             for (FeignInterceptor i : interceptors) request = i.beforeExecute(request);
@@ -155,7 +163,36 @@ public class FeignClientProxy implements InvocationHandler {
 
     // ── body encoding ──
 
-    private byte[] encodeBody(Method method, Object[] args) throws Exception {
+    private byte[] encodeBody(Method method, Object[] args, FeignMethod ann) throws Exception {
+        String contentType = ann.contentType();
+        // form-encoded: collect @Query and non-path params into key=value pairs
+        if ("application/x-www-form-urlencoded".equals(contentType)) {
+            Map<String, String> form = new LinkedHashMap<>();
+            Parameter[] params = method.getParameters();
+            for (int i = 0; i < params.length; i++) {
+                if (params[i].getAnnotation(Path.class) == null
+                    && args != null && i < args.length && args[i] != null
+                    && isPrimitiveOrWrapper(params[i].getType())) {
+                    String key = params[i].getAnnotation(Query.class) != null
+                        ? params[i].getAnnotation(Query.class).value()
+                        : params[i].getName();
+                    form.put(key, args[i].toString());
+                }
+            }
+            if (!form.isEmpty()) {
+                return form.entrySet().stream()
+                    .map(e -> {
+                        try {
+                            return e.getKey() + "=" + java.net.URLEncoder.encode(e.getValue(), "UTF-8");
+                        } catch (UnsupportedEncodingException ex) {
+                            throw new RuntimeException(ex);
+                        }
+                    })
+                    .reduce((a, b) -> a + "&" + b).orElse("").getBytes();
+            }
+            return null;
+        }
+        // JSON body (default)
         Object bodyObj = extractBody(method, args);
         if (bodyObj == null) return null;
         Type bodyType = getBodyType(method);
@@ -283,6 +320,20 @@ public class FeignClientProxy implements InvocationHandler {
             int c = s.indexOf(':'); if (c > 0) h.put(s.substring(0, c).trim(), s.substring(c + 1).trim());
         }
         return h;
+    }
+
+    /** Collect @Query-annotated parameters as key=value pairs. */
+    private Map<String, String> extractQueryParams(Method method, Object[] args) {
+        Map<String, String> map = new LinkedHashMap<>();
+        if (args == null) return map;
+        Parameter[] params = method.getParameters();
+        for (int i = 0; i < params.length; i++) {
+            Query q = params[i].getAnnotation(Query.class);
+            if (q != null && args[i] != null) {
+                map.put(q.value(), args[i].toString());
+            }
+        }
+        return map;
     }
 
     private Object extractBody(Method method, Object[] args) {

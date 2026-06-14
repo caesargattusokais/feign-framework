@@ -17,4 +17,7 @@ public @interface FeignMethod {
     String[] headers() default {};
 
     String name() default "";
+
+    /** Content-Type of the request body. Defaults to application/json. */
+    String contentType() default "application/json";
 }

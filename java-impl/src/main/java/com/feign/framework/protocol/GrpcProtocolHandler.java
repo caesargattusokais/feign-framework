@@ -93,24 +93,23 @@ public class GrpcProtocolHandler implements ProtocolHandler {
         entry.touch();
 
         String fullMethod = target.serviceName + "/" + target.methodName;
-        String jsonPayload = request.getBody() != null
-                ? new String(request.getBody()) : "{}";
+        byte[] payload = request.getBody() != null ? request.getBody() : new byte[0];
 
-        MethodDescriptor.Marshaller<String> m = stringMarshaller();
-        MethodDescriptor<String, String> methodDesc =
-                MethodDescriptor.<String, String>newBuilder()
+        MethodDescriptor.Marshaller<byte[]> m = byteMarshaller();
+        MethodDescriptor<byte[], byte[]> methodDesc =
+                MethodDescriptor.<byte[], byte[]>newBuilder()
                         .setType(MethodDescriptor.MethodType.UNARY)
                         .setFullMethodName(fullMethod)
                         .setRequestMarshaller(m)
                         .setResponseMarshaller(m)
                         .build();
 
-        ClientCall<String, String> call = entry.channel.newCall(methodDesc,
+        ClientCall<byte[], byte[]> call = entry.channel.newCall(methodDesc,
                 CallOptions.DEFAULT.withDeadlineAfter(callTimeoutMs, TimeUnit.MILLISECONDS));
 
-        CompletableFuture<String> future = new CompletableFuture<>();
+        CompletableFuture<byte[]> future = new CompletableFuture<>();
         call.start(new ClientCall.Listener<>() {
-            @Override public void onMessage(String msg) { future.complete(msg); }
+            @Override public void onMessage(byte[] msg) { future.complete(msg); }
             @Override
             public void onClose(io.grpc.Status s, Metadata t) {
                 if (!s.isOk() && !future.isDone())
@@ -118,13 +117,14 @@ public class GrpcProtocolHandler implements ProtocolHandler {
             }
         }, new Metadata());
 
-        call.sendMessage(jsonPayload);
+        call.sendMessage(payload);
         call.halfClose();
         call.request(1);
 
         try {
-            String body = future.get(callTimeoutMs, TimeUnit.MILLISECONDS);
-            return Response.of(request.getUrl(), 200, new HashMap<>(), body);
+            byte[] responseBytes = future.get(callTimeoutMs, TimeUnit.MILLISECONDS);
+            return Response.of(request.getUrl(), 200, new HashMap<>(),
+                new String(responseBytes, StandardCharsets.UTF_8));
         } catch (TimeoutException e) {
             throw new FeignException("gRPC call timeout: " + fullMethod);
         }
@@ -228,12 +228,12 @@ public class GrpcProtocolHandler implements ProtocolHandler {
         return entry;
     }
 
-    private static MethodDescriptor.Marshaller<String> stringMarshaller() {
+    private static MethodDescriptor.Marshaller<byte[]> byteMarshaller() {
         return new MethodDescriptor.Marshaller<>() {
-            @Override public InputStream stream(String value) {
-                return new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8)); }
-            @Override public String parse(InputStream stream) {
-                try { return new String(stream.readAllBytes(), StandardCharsets.UTF_8); }
+            @Override public InputStream stream(byte[] value) {
+                return new ByteArrayInputStream(value); }
+            @Override public byte[] parse(InputStream stream) {
+                try { return stream.readAllBytes(); }
                 catch (java.io.IOException e) { throw new RuntimeException(e); }
             }
         };
