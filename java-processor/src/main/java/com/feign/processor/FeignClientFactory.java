@@ -43,6 +43,12 @@ public class FeignClientFactory {
     public FeignClientFactory loadBalancer(LoadBalancer lb)      { this.loadBalancer = lb; return this; }
     public FeignClientFactory serviceDiscovery(ServiceDiscovery sd) { this.serviceDiscovery = sd; return this; }
 
+    private Object fallbackInstance;
+    /** Set a pre-built fallback instance (e.g., from Spring context). */
+    public FeignClientFactory fallbackInstance(Object instance) {
+        this.fallbackInstance = instance; return this;
+    }
+
     public FeignClientFactory addInterceptor(FeignInterceptor i, int order) {
         this.interceptors.add(new OrderedInterceptor(i, order));
         this.interceptors.sort(Comparator.comparingInt(FeignInterceptor::order));
@@ -77,6 +83,10 @@ public class FeignClientFactory {
         FeignClientProxy handler = new FeignClientProxy(
             metadata, interceptors, loadBalancer, protocolHandler,
             decoder, encoder, serviceDiscovery, ann.fallback());
+
+        if (fallbackInstance != null) {
+            handler.setFallbackInstance(fallbackInstance);
+        }
 
         return handler.createProxy(c);
     }

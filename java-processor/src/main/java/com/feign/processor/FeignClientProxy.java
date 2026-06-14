@@ -42,6 +42,7 @@ public class FeignClientProxy implements InvocationHandler {
     private final Encoder encoder;
     private final ServiceDiscovery serviceDiscovery;
     private final Class<?> fallbackClass;
+    private Object fallbackInstance; // lazy singleton — holds the fallback implementation
     private final int connectTimeout, readTimeout;
 
     // -- protocol registry --
@@ -116,8 +117,23 @@ public class FeignClientProxy implements InvocationHandler {
 
     // -- fallback --
 
+    /** Inject a pre-built fallback instance (e.g., from Spring context). */
+    public void setFallbackInstance(Object instance) {
+        this.fallbackInstance = instance;
+    }
+
+    /**
+     * Invoke fallback. The fallback class implements the same interface,
+     * so the proxy's {@code method} (from the interface) works on the fallback instance.
+     */
     private Object invokeFallback(Method method, Object[] args) throws Exception {
-        Object fallbackInstance = fallbackClass.getDeclaredConstructor().newInstance();
+        if (fallbackInstance == null) {
+            synchronized (this) {
+                if (fallbackInstance == null) {
+                    fallbackInstance = fallbackClass.getDeclaredConstructor().newInstance();
+                }
+            }
+        }
         return method.invoke(fallbackInstance, args);
     }
 

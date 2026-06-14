@@ -81,6 +81,19 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
         // ── URL (annotation value overridden by config if set) ──
         String targetUrl = config.getUrl() != null ? config.getUrl() : url;
 
+        // ── Fallback (from Spring context) ──
+        com.feign.framework.annotations.FeignClient ann =
+            interfaceClass.getAnnotation(com.feign.framework.annotations.FeignClient.class);
+        if (ann != null && ann.fallback() != Void.class) {
+            if (beanFactory.containsBean(ann.fallback().getSimpleName())) {
+                factory.fallbackInstance(beanFactory.getBean(ann.fallback()));
+            } else {
+                // Create fallback as Spring-managed bean (supports @Autowired inside fallback)
+                Object fb = beanFactory.getBean(ann.fallback());
+                factory.fallbackInstance(fb);
+            }
+        }
+
         return factory.build(interfaceClass, targetUrl);
     }
 
