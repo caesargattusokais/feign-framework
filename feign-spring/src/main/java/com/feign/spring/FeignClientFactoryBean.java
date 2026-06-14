@@ -1,7 +1,6 @@
 package com.feign.spring;
 
 import com.feign.framework.codec.Decoder;
-import com.feign.framework.codec.GsonDecoder;
 import com.feign.framework.interceptor.FeignInterceptor;
 import com.feign.framework.loadbalancer.LoadBalancer;
 import com.feign.framework.loadbalancer.LoadBalancerType;
@@ -11,6 +10,7 @@ import com.feign.framework.protocol.GrpcProtocolHandler;
 import com.feign.framework.protocol.WebSocketProtocolHandler;
 import com.feign.processor.FeignClientFactory;
 
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
@@ -39,7 +39,7 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
     }
 
     @Override
-    public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+    public void setBeanFactory(@NonNull BeanFactory beanFactory) throws BeansException {
         this.beanFactory = beanFactory;
     }
 
@@ -79,10 +79,7 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
         return interfaceClass;
     }
 
-    @Override
-    public boolean isSingleton() {
-        return true;
-    }
+
 
     // ── resolvers ──
 
