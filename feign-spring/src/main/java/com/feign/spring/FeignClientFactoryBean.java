@@ -80,6 +80,31 @@ public class FeignClientFactoryBean implements FactoryBean<Object>, BeanFactoryA
             factory.circuitBreaker(new com.feign.framework.circuit.DefaultCircuitBreaker());
         }
 
+        // ── Tracing (optional) ──
+        FeignProperties.TracingProps tracing = config.getTracing();
+        if (tracing != null && tracing.isEnabled() != null && tracing.isEnabled()) {
+            com.feign.framework.trace.TracingConfig tc = new com.feign.framework.trace.TracingConfig()
+                .setEnabled(true)
+                .setServiceName(tracing.getServiceName() != null ? tracing.getServiceName() : "unknown")
+                .setSampleRate(tracing.getSampleRate() != null ? tracing.getSampleRate() : 1.0)
+                .setHeaderTraceId(tracing.getHeaderTraceId() != null ? tracing.getHeaderTraceId() : "X-Trace-Id")
+                .setHeaderSpanId(tracing.getHeaderSpanId() != null ? tracing.getHeaderSpanId() : "X-Span-Id")
+                .setLogEnabled(tracing.isLogEnabled() != null && tracing.isLogEnabled())
+                .setOrder(tracing.getOrder() != null ? tracing.getOrder() : 0);
+
+            com.feign.framework.trace.Tracer tracer = com.feign.framework.trace.Tracer.builder()
+                .serviceName(tc.getServiceName())
+                .headerTraceId(tc.getHeaderTraceId())
+                .headerSpanId(tc.getHeaderSpanId())
+                .sampleRate(tc.getSampleRate())
+                .reporter("logging".equals(tracing.getReporter())
+                    ? com.feign.framework.trace.Tracer.loggingReporter()
+                    : com.feign.framework.trace.Tracer.noopReporter())
+                .build();
+
+            factory.addInterceptor(new com.feign.framework.trace.TracingInterceptor(tracer, tc));
+        }
+
         // ── Interceptors (by bean name) ──
         List<FeignInterceptor> interceptors = resolveInterceptors(config);
         for (FeignInterceptor interceptor : interceptors) {

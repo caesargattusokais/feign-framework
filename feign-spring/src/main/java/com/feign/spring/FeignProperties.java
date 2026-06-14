@@ -64,6 +64,7 @@ public class FeignProperties {
         private String discoveryBean;       // ServiceDiscovery bean name
         private Boolean circuitBreakerEnabled; // enable default circuit breaker
         private String circuitBreakerBean;  // custom CircuitBreaker bean name
+        private TracingProps tracing = new TracingProps();
 
         // --- merge: specific overrides default ---
         public ClientConfig merge(ClientConfig specific) {
@@ -114,5 +115,30 @@ public class FeignProperties {
         public String getDiscoveryBean() { return discoveryBean; } public void setDiscoveryBean(String v) { this.discoveryBean = v; }
         public Boolean isCircuitBreakerEnabled() { return circuitBreakerEnabled; } public void setCircuitBreakerEnabled(Boolean v) { this.circuitBreakerEnabled = v; }
         public String getCircuitBreakerBean() { return circuitBreakerBean; } public void setCircuitBreakerBean(String v) { this.circuitBreakerBean = v; }
+        public TracingProps getTracing() { return tracing; } public void setTracing(TracingProps v) { this.tracing = v; }
+    }
+
+    public static class TracingProps {
+        private Boolean enabled = true;
+        private String serviceName = "unknown";
+        private String headerTraceId = "X-Trace-Id";
+        private String headerSpanId = "X-Span-Id";
+        private String headerSampled = "X-Sampled";
+        private String headerParentSpanId = "X-Parent-Span-Id";
+        private Double sampleRate = 1.0;
+        private String reporter = "logging";
+        private Boolean logEnabled = false;
+        private Integer order = 0;
+
+        public Boolean isEnabled() { return enabled; } public void setEnabled(Boolean v) { this.enabled = v; }
+        public String getServiceName() { return serviceName; } public void setServiceName(String v) { this.serviceName = v; }
+        public String getHeaderTraceId() { return headerTraceId; } public void setHeaderTraceId(String v) { this.headerTraceId = v; }
+        public String getHeaderSpanId() { return headerSpanId; } public void setHeaderSpanId(String v) { this.headerSpanId = v; }
+        public String getHeaderSampled() { return headerSampled; } public void setHeaderSampled(String v) { this.headerSampled = v; }
+        public String getHeaderParentSpanId() { return headerParentSpanId; } public void setHeaderParentSpanId(String v) { this.headerParentSpanId = v; }
+        public Double getSampleRate() { return sampleRate; } public void setSampleRate(Double v) { this.sampleRate = v; }
+        public String getReporter() { return reporter; } public void setReporter(String v) { this.reporter = v; }
+        public Boolean isLogEnabled() { return logEnabled; } public void setLogEnabled(Boolean v) { this.logEnabled = v; }
+        public Integer getOrder() { return order; } public void setOrder(Integer v) { this.order = v; }
     }
 }
